@@ -124,6 +124,12 @@ body {
   z-index: 20;
 }
 
+.card-hover-name,
+.card-hover-name:hover,
+.card-hover-name:focus {
+  text-decoration: none;
+}
+
 .card-hover-name {
   position: relative;
   z-index: 2;
