@@ -208,6 +208,11 @@
                 <td data-sort-value="history"><a class="btn btn-sm btn-outline-light" href="{{ url_for('card_detail', card_id=row.card_id) }}">View</a></td>
               </tr>
 
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% for row in collection_rows %}
               <div class="modal fade" id="collectionCardModal-{{ row.card_id }}" tabindex="-1" aria-labelledby="collectionCardModalLabel-{{ row.card_id }}" aria-hidden="true">
                 <div class="modal-dialog modal-lg modal-dialog-centered">
                   <div class="modal-content bg-dark text-light border-secondary">
@@ -246,10 +251,7 @@
                   </div>
                 </div>
               </div>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+      {% endfor %}
      </div>
     {% else %}
       <div class="empty-state">
