@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <div class="card-panel mb-4">
+    <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-3">
+      <div>
+        <h1 class="mb-1">{{ card.name }}</h1>
+        <p class="text-secondary mb-0">{{ card.set_name or card.set_code }} · Collector # {{ card.collector_number }} · {{ 'Foil' if card.foil else 'Non-foil' }}</p>
+      </div>
+      <a class="btn btn-outline-light" href="{{ url_for('index') }}">Back to collection</a>
+    </div>
+
+    <div class="row g-4 align-items-stretch mt-2">
+      <div class="col-lg-4">
+        <div class="stat-card h-100">
+          <div class="label">Current market price</div>
+          <div class="value">${{ '%.2f' | format(card.price_usd or 0) }}</div>
+          <div class="text-secondary mt-2">Last updated {{ card.last_updated or 'never' }}</div>
+        </div>
+      </div>
+      <div class="col-lg-8">
+        <div class="chart-wrap">
+          <canvas id="priceChart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const history = {{ history | tojson | safe }};
+    const labels = history.map(item => item.recorded_at);
+    const prices = history.map(item => Number(item.price_usd));
+
+    const ctx = document.getElementById('priceChart');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'USD Price',
+          data: prices,
+          borderColor: '#8ab4f8',
+          backgroundColor: 'rgba(138, 180, 248, 0.2)',
+          fill: true,
+          tension: 0.3,
+          borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#c9d1d9' },
+            grid: { color: 'rgba(255,255,255,0.06)' }
+          },
+          y: {
+            ticks: { color: '#c9d1d9' },
+            grid: { color: 'rgba(255,255,255,0.06)' }
+          }
+        }
+      }
+    });
+  </script>
+{% endblock %}

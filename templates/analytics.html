@@ -1,0 +1,181 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+    <div>
+      <h1 class="mb-1">Analytics</h1>
+      <p class="text-secondary mb-0">Track collection performance by price movement and value change over time.</p>
+    </div>
+    <div class="d-flex align-items-center gap-2 flex-wrap">
+      <div class="btn-group" role="group" aria-label="Analytics periods">
+        {% for label, value in [('1M', '1m'), ('3M', '3m'), ('6M', '6m'), ('1Y', '1y'), ('All', 'all')] %}
+          <a
+            href="{{ url_for('analytics', period=value) }}"
+            class="btn btn-sm {% if analytics.period == value %}btn-primary{% else %}btn-outline-light{% endif %}"
+          >
+            {{ label }}
+          </a>
+        {% endfor %}
+      </div>
+      <a class="btn btn-outline-light" href="{{ url_for('index') }}">Back to collection</a>
+    </div>
+  </div>
+
+  <div class="row g-3 mb-4">
+    <div class="col-md-3">
+      <div class="stat-card">
+        <div class="label">Current value</div>
+        <div class="value">${{ '%.2f' | format(analytics.summary.total_value or 0) }}</div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="stat-card">
+        <div class="label">Dollar change</div>
+        <div class="value">{{ analytics.summary.overall_change_display }}</div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="stat-card">
+        <div class="label">Percent change</div>
+        <div class="value">{{ analytics.summary.overall_percent_change_display }}</div>
+      </div>
+    </div>
+    <div class="col-md-3">
+      <div class="stat-card">
+        <div class="label">Cards tracked</div>
+        <div class="value">{{ analytics.summary.total_cards }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card-panel mb-4">
+    <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <h2 class="mb-0">Collection value over time</h2>
+      <span class="price-pill">{{ analytics.summary.overall_change_display }} / {{ analytics.summary.overall_percent_change_display }}</span>
+    </div>
+    <div class="p-2">
+      <canvas id="trendChart"></canvas>
+    </div>
+  </div>
+
+  <div class="row g-4">
+    <div class="col-lg-6">
+      <div class="card-panel h-100">
+        <div class="panel-header">
+          <h2>Top winners</h2>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-dark table-hover align-middle mb-0">
+            <thead>
+              <tr>
+                <th>Card</th>
+                <th>Start</th>
+                <th>Latest</th>
+                <th>Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for card in analytics.top_winners %}
+                <tr>
+                  <td>{{ card.name }}</td>
+                  <td>${{ '%.2f' | format(card.start_price or 0) }}</td>
+                  <td>${{ '%.2f' | format(card.latest_price or 0) }}</td>
+                  <td class="text-success fw-semibold">{{ card.percent_change_display }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-6">
+      <div class="card-panel h-100">
+        <div class="panel-header">
+          <h2>Top losers</h2>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-dark table-hover align-middle mb-0">
+            <thead>
+              <tr>
+                <th>Card</th>
+                <th>Start</th>
+                <th>Latest</th>
+                <th>Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for card in analytics.top_losers %}
+                <tr>
+                  <td>{{ card.name }}</td>
+                  <td>${{ '%.2f' | format(card.start_price or 0) }}</td>
+                  <td>${{ '%.2f' | format(card.latest_price or 0) }}</td>
+                  <td class="text-danger fw-semibold">{{ card.percent_change_display }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card-panel mt-4">
+    <div class="panel-header">
+      <h2>Set value breakdown</h2>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-dark table-hover align-middle mb-0">
+        <thead>
+          <tr>
+            <th>Set</th>
+            <th>Cards</th>
+            <th>Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for set in analytics.by_set %}
+            <tr>
+              <td>{{ set.set_label }}</td>
+              <td>{{ set.quantity }}</td>
+              <td>${{ '%.2f' | format(set.total_value or 0) }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const trendData = {{ analytics.collection_trend | tojson }};
+
+    new Chart(document.getElementById('trendChart'), {
+      type: 'line',
+      data: {
+        labels: trendData.map(item => item.date),
+        datasets: [{
+          label: 'Collection value',
+          data: trendData.map(item => Number(item.total_value || 0)),
+          borderColor: '#5ea1ff',
+          backgroundColor: 'rgba(94, 161, 255, 0.18)',
+          fill: true,
+          tension: 0.25
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false }
+        },
+        scales: {
+          y: {
+            ticks: {
+              callback: value => '$' + Number(value).toFixed(0)
+            }
+          }
+        }
+      }
+    });
+  </script>
+{% endblock %}

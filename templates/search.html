@@ -1,0 +1,142 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
+    <div>
+      <h1 class="mb-1">Card search</h1>
+      <p class="text-secondary mb-0">Find cards to add to your collection.</p>
+    </div>
+    <a class="btn btn-outline-light" href="{{ url_for('index') }}">Back to collection</a>
+  </div>
+
+  <section class="card-panel mb-4">
+    <div class="panel-header">
+      <h2>Search results</h2>
+    </div>
+    {% if query %}
+      <div class="list-group list-group-flush">
+        {% if search_results %}
+          <div class="small text-secondary mb-2">Showing {{ search_results|length }} matching cards.</div>
+          {% for card in search_results %}
+            {% set first_variant = card.variants.foil if card.variants.foil is defined else card.variants.nonfoil %}
+            <div class="list-group-item bg-transparent d-flex justify-content-between align-items-center flex-wrap gap-3">
+              <div class="card-hover-wrap">
+                <button
+                  type="button"
+                  class="btn btn-link text-start p-0 fw-semibold card-hover-name"
+                  data-bs-toggle="modal"
+                  data-bs-target="#cardModal-{{ loop.index0 }}"
+                >
+                  {{ card.name }}
+                </button>
+                {% if card.image_url %}
+                  <img class="card-hover-image" src="{{ card.image_url }}" alt="{{ card.name }}" />
+                {% endif %}
+                <div class="small text-secondary">
+                  {{ card.set_name or card.set_code }} · {{ card.collector_number }}
+                </div>
+              </div>
+              <div class="d-flex align-items-center gap-2 flex-wrap">
+                {% if card.variants.foil is defined %}
+                  <form method="POST" action="{{ url_for('add_to_collection') }}">
+                    <input type="hidden" name="card_id" value="{{ card.variants.foil.id }}" />
+                    <input type="hidden" name="quantity" value="1" />
+                    <input type="hidden" name="search_q" value="{{ query or '' }}" />
+                    <button class="btn btn-sm btn-primary" type="submit">Add foil ${{ '%.2f' | format(card.variants.foil.price_usd or 0) }}</button>
+                  </form>
+                {% endif %}
+                {% if card.variants.nonfoil is defined %}
+                  <form method="POST" action="{{ url_for('add_to_collection') }}">
+                    <input type="hidden" name="card_id" value="{{ card.variants.nonfoil.id }}" />
+                    <input type="hidden" name="quantity" value="1" />
+                    <input type="hidden" name="search_q" value="{{ query or '' }}" />
+                    <button class="btn btn-sm btn-outline-primary" type="submit">Add nonfoil ${{ '%.2f' | format(card.variants.nonfoil.price_usd or 0) }}</button>
+                  </form>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="modal fade" id="cardModal-{{ loop.index0 }}" tabindex="-1" aria-labelledby="cardModalLabel-{{ loop.index0 }}" aria-hidden="true">
+              <div class="modal-dialog modal-lg modal-dialog-centered">
+                <div class="modal-content bg-dark text-light border-secondary">
+                  <div class="modal-header border-secondary">
+                    <h5 class="modal-title" id="cardModalLabel-{{ loop.index0 }}">{{ card.name }}</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                  </div>
+                  <div class="modal-body">
+                    <div class="row g-4 align-items-center">
+                      <div class="col-md-5 text-center">
+                        {% if card.image_url %}
+                          <img src="{{ card.image_url }}" alt="{{ card.name }}" class="img-fluid rounded shadow" style="max-height: 380px;" />
+                        {% else %}
+                          <div class="empty-state">
+                            <p>No image available for this card.</p>
+                          </div>
+                        {% endif %}
+                      </div>
+                      <div class="col-md-7">
+                        <div class="mb-2 text-secondary">{{ card.set_name or card.set_code }} · #{{ card.collector_number }}</div>
+                        <ul class="list-group list-group-flush">
+                          {% if card.variants.foil is defined %}
+                            <li class="list-group-item bg-transparent text-light border-secondary">Foil price: ${{ '%.2f' | format(card.variants.foil.price_usd or 0) }}</li>
+                          {% endif %}
+                          {% if card.variants.nonfoil is defined %}
+                            <li class="list-group-item bg-transparent text-light border-secondary">Non-foil price: ${{ '%.2f' | format(card.variants.nonfoil.price_usd or 0) }}</li>
+                          {% endif %}
+                        </ul>
+                        <div class="d-flex gap-2 mt-3 flex-wrap">
+                          {% if card.variants.foil is defined %}
+                            <form method="POST" action="{{ url_for('add_to_collection') }}">
+                              <input type="hidden" name="card_id" value="{{ card.variants.foil.id }}" />
+                              <input type="hidden" name="quantity" value="1" />
+                              <input type="hidden" name="search_q" value="{{ query or '' }}" />
+                              <button class="btn btn-primary" type="submit">Add foil</button>
+                            </form>
+                          {% endif %}
+                          {% if card.variants.nonfoil is defined %}
+                            <form method="POST" action="{{ url_for('add_to_collection') }}">
+                              <input type="hidden" name="card_id" value="{{ card.variants.nonfoil.id }}" />
+                              <input type="hidden" name="quantity" value="1" />
+                              <input type="hidden" name="search_q" value="{{ query or '' }}" />
+                              <button class="btn btn-outline-primary" type="submit">Add nonfoil</button>
+                            </form>
+                          {% endif %}
+                          {% if first_variant %}
+                            <a class="btn btn-outline-light" href="{{ url_for('card_detail', card_id=first_variant.id) }}">View full history</a>
+                          {% endif %}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="list-group-item bg-transparent text-secondary">No cards matched that search.</div>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="list-group-item bg-transparent text-secondary">Enter a card name to search the catalog.</div>
+    {% endif %}
+  </section>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('.card-hover-wrap').forEach((wrap) => {
+        const trigger = wrap.querySelector('.card-hover-name');
+        if (!trigger) return;
+
+        const show = () => wrap.classList.add('is-hovered');
+        const hide = () => wrap.classList.remove('is-hovered');
+
+        trigger.addEventListener('mouseenter', show);
+        trigger.addEventListener('mouseleave', hide);
+        trigger.addEventListener('focus', show);
+        trigger.addEventListener('blur', hide);
+        wrap.addEventListener('mouseenter', show);
+        wrap.addEventListener('mouseleave', hide);
+      });
+    });
+  </script>
+{% endblock %}
