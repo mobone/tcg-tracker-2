@@ -14,12 +14,18 @@
       <h2>Search results</h2>
     </div>
     {% if query %}
-      <div class="list-group list-group-flush">
+      <div class="list-group list-group-flush" id="search-results" data-view="list">
         {% if search_results %}
-          <div class="small text-secondary mb-2">Showing {{ search_results|length }} matching cards.</div>
+          <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+            <div class="small text-secondary">Showing {{ search_results|length }} matching cards.</div>
+            <div class="btn-group btn-group-sm" role="group" aria-label="Result view">
+              <button type="button" class="btn btn-outline-light active" data-view-toggle="list">List</button>
+              <button type="button" class="btn btn-outline-light" data-view-toggle="cards">Cards</button>
+            </div>
+          </div>
           {% for card in search_results %}
             {% set first_variant = card.variants.foil if card.variants.foil is defined else card.variants.nonfoil %}
-            <div class="list-group-item bg-transparent d-flex justify-content-between align-items-center flex-wrap gap-3">
+            <div class="list-group-item bg-transparent d-flex justify-content-between align-items-center flex-wrap gap-3 search-list-row">
               <div class="card-hover-wrap">
                 <button
                   type="button"
@@ -113,6 +119,33 @@
               </div>
             </div>
           {% endfor %}
+          <div class="search-card-grid">
+            {% for card in search_results %}
+              <div class="search-card-tile">
+                <button type="button" class="btn p-0 border-0 search-card-image" data-bs-toggle="modal" data-bs-target="#cardModal-{{ loop.index0 }}" aria-label="{{ card.name }}">
+                  {% if card.image_url %}
+                    <img src="{{ card.image_url }}" alt="{{ card.name }}" loading="lazy" />
+                  {% else %}
+                    <div class="empty-state"><p>{{ card.name }}</p></div>
+                  {% endif %}
+                </button>
+                <div class="fw-semibold mt-2">{{ card.name }}</div>
+                <div class="small text-secondary mb-2">{{ card.set_name or card.set_code }} · {{ card.collector_number }}</div>
+                <div class="d-flex gap-2 flex-wrap justify-content-center">
+                  {% for key, label in [('foil', 'foil'), ('nonfoil', 'nonfoil')] %}
+                    {% if card.variants[key] is defined %}
+                      <form method="POST" action="{{ url_for('add_to_collection') }}">
+                        <input type="hidden" name="card_id" value="{{ card.variants[key].id }}" />
+                        <input type="hidden" name="quantity" value="1" />
+                        <input type="hidden" name="search_q" value="{{ query or '' }}" />
+                        <button class="btn btn-sm btn-primary" type="submit">Add {{ label }} ${{ '%.2f' | format(card.variants[key].price_usd or 0) }}</button>
+                      </form>
+                    {% endif %}
+                  {% endfor %}
+                </div>
+              </div>
+            {% endfor %}
+          </div>
         {% else %}
           <div class="list-group-item bg-transparent text-secondary">No cards matched that search.</div>
         {% endif %}
@@ -124,6 +157,20 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', () => {
+      const results = document.getElementById('search-results');
+      if (results) {
+        const toggles = results.querySelectorAll('[data-view-toggle]');
+        const setView = (view) => {
+          results.dataset.view = view;
+          toggles.forEach((btn) => btn.classList.toggle('active', btn.dataset.viewToggle === view));
+          try { localStorage.setItem('searchView', view); } catch (e) {}
+        };
+        toggles.forEach((btn) => btn.addEventListener('click', () => setView(btn.dataset.viewToggle)));
+        let saved = null;
+        try { saved = localStorage.getItem('searchView'); } catch (e) {}
+        if (saved === 'cards' || saved === 'list') setView(saved);
+      }
+
       document.querySelectorAll('.card-hover-wrap').forEach((wrap) => {
         const trigger = wrap.querySelector('.card-hover-name');
         if (!trigger) return;

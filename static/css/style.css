@@ -156,3 +156,39 @@ body {
   opacity: 1;
   transform: translateY(0);
 }
+
+#search-results[data-view="cards"] .search-list-row {
+  display: none !important;
+}
+
+.search-card-grid {
+  display: none;
+}
+
+#search-results[data-view="cards"] .search-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1.25rem;
+  padding: 0.5rem 0;
+}
+
+.search-card-tile {
+  text-align: center;
+}
+
+.search-card-image img {
+  width: 100%;
+  border-radius: 12px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+
+#collection-view[data-view="cards"] .collection-list {
+  display: none;
+}
+
+#collection-view[data-view="cards"] .search-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1.25rem;
+  padding: 0.5rem 0;
+}
