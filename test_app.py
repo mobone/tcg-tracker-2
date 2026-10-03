@@ -131,6 +131,10 @@ class SearchResultModalTests(unittest.TestCase):
             "INSERT INTO cards (name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             ("Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, 999.0, "https://example.com/lotus-petal.jpg", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
         )
+        conn.execute(
+            "INSERT INTO collection (card_id, quantity, name, set_code, set_name, collector_number, foil, image_url, price_usd, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (1, 1, "Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, "https://example.com/lotus-petal.jpg", 999.0, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+        )
         conn.commit()
         conn.close()
 
@@ -139,7 +143,8 @@ class SearchResultModalTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotIn(b'Search results', response.data)
-        self.assertNotIn(b'Lotus Petal', response.data)
+        self.assertIn(b'card-hover-image', response.data)
+        self.assertIn(b'https://example.com/lotus-petal.jpg', response.data)
 
 
 if __name__ == "__main__":

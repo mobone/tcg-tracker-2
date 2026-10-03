@@ -567,6 +567,7 @@ def get_collection_rows():
             cards.collector_number,
             cards.foil,
             cards.price_usd,
+            cards.image_url,
             cards.last_updated
         FROM collection c
         JOIN cards ON cards.id = c.card_id

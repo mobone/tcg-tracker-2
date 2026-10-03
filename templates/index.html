@@ -113,7 +113,16 @@
           <tbody>
             {% for row in collection_rows %}
               <tr>
-                <td data-sort-value="{{ row.name|lower }}">{{ row.name }}</td>
+                <td data-sort-value="{{ row.name|lower }}">
+                  <div class="card-hover-wrap">
+                    <button type="button" class="btn btn-link text-start p-0 fw-semibold card-hover-name">
+                      {{ row.name }}
+                    </button>
+                    {% if row.image_url %}
+                      <img class="card-hover-image" src="{{ row.image_url }}" alt="{{ row.name }}" />
+                    {% endif %}
+                  </div>
+                </td>
                 <td data-sort-value="{{ row.set_code|lower }}">{{ row.set_code }}</td>
                 <td data-sort-value="{{ row.collector_number or '' }}">{{ row.collector_number }}</td>
                 <td data-sort-value="{{ 1 if row.foil else 0 }}">{{ 'Foil' if row.foil else 'Non-foil' }}</td>
