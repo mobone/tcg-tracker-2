@@ -512,6 +512,7 @@ def sync_if_needed():
     return True
 
 
+
 def schedule_daily_scryfall_sync():
     global SCHEDULER
     if SCHEDULER is not None and SCHEDULER.running:
