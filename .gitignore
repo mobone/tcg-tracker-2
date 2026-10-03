@@ -3,5 +3,4 @@ venv/
 .env
 *.pyc
 *.pyo
-*.db
 *.gz
