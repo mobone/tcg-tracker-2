@@ -34,6 +34,20 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', () => {
+      const view = document.getElementById('collection-view');
+      if (view) {
+        const toggles = document.querySelectorAll('[data-view-toggle]');
+        const setView = (mode) => {
+          view.dataset.view = mode;
+          toggles.forEach((btn) => btn.classList.toggle('active', btn.dataset.viewToggle === mode));
+          try { localStorage.setItem('collectionView', mode); } catch (e) {}
+        };
+        toggles.forEach((btn) => btn.addEventListener('click', () => setView(btn.dataset.viewToggle)));
+        let saved = null;
+        try { saved = localStorage.getItem('collectionView'); } catch (e) {}
+        if (saved === 'cards' || saved === 'list') setView(saved);
+      }
+
       const HIDE_DELAY_MS = 1000;
       document.querySelectorAll('.card-hover-wrap').forEach((wrap) => {
         const trigger = wrap.querySelector('.card-hover-name');
@@ -120,11 +134,37 @@
   </script>
 
   <section class="card-panel">
-    <div class="panel-header">
+    <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
       <h2>Collection</h2>
+      {% if collection_rows %}
+        <div class="btn-group btn-group-sm" role="group" aria-label="Collection view">
+          <button type="button" class="btn btn-outline-light active" data-view-toggle="list">List</button>
+          <button type="button" class="btn btn-outline-light" data-view-toggle="cards">Cards</button>
+        </div>
+      {% endif %}
     </div>
     {% if collection_rows %}
-      <div class="table-responsive">
+     <div id="collection-view" data-view="list">
+      <div class="search-card-grid">
+        {% for row in collection_rows %}
+          <div class="search-card-tile">
+            <button type="button" class="btn p-0 border-0 search-card-image" data-bs-toggle="modal" data-bs-target="#collectionCardModal-{{ row.card_id }}" aria-label="{{ row.name }}">
+              {% if row.image_url %}
+                <img src="{{ row.image_url }}" alt="{{ row.name }}" loading="lazy" />
+              {% else %}
+                <div class="empty-state"><p>{{ row.name }}</p></div>
+              {% endif %}
+            </button>
+            {% set pct = row.percent_change or 0 %}
+            <div class="fw-semibold mt-2">{{ row.name }}</div>
+            <div class="small text-secondary">{{ row.set_code }} · {{ row.collector_number }} · {{ 'Foil' if row.foil else 'Non-foil' }}</div>
+            <div class="small">Qty {{ row.quantity }} · ${{ '%.2f' | format(row.price_usd or 0) }}
+              <span class="fw-semibold {{ 'text-success' if pct > 0 else 'text-danger' if pct < 0 else 'text-secondary' }}">{{ '%+.2f' | format(pct) }}%</span>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+      <div class="table-responsive collection-list">
         <table id="collection-table" class="table table-dark table-hover align-middle mb-0">
           <thead>
             <tr>
@@ -210,6 +250,7 @@
           </tbody>
         </table>
       </div>
+     </div>
     {% else %}
       <div class="empty-state">
         <p>No cards in your collection yet. Search for a card above and add it.</p>
