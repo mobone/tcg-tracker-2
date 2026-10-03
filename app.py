@@ -1,5 +1,6 @@
 import gzip
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -25,6 +26,16 @@ SYNC_LOCK = threading.Lock()
 SYNC_THREAD = None
 SCHEDULER = None
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+
+def log(*args):
+    print(datetime.now().strftime("[%Y-%m-%d %H:%M:%S]"), *args, flush=True)
+
 
 def get_db_connection():
     conn = sqlite3.connect(app.config["DATABASE"])
@@ -34,7 +45,7 @@ def get_db_connection():
 
 
 def init_db():
-    print("Initializing database...")
+    log("Initializing database...")
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = get_db_connection()
     conn.execute("PRAGMA foreign_keys = ON")
@@ -310,7 +321,7 @@ def fetch_latest_default_cards_url():
         bulk_data = bulk_response.json()
         for item in bulk_data.get("data", []):
             if item.get("type") == "default_cards":
-                print("Using Scryfall default cards URL:", item.get("download_uri"))
+                log("Using Scryfall default cards URL:", item.get("download_uri"))
                 return item.get("download_uri") or SCRYFALL_DEFAULT_CARDS_URL
     except requests.RequestException:
         pass
@@ -441,16 +452,16 @@ def upsert_card_record(record, conn=None):
 
 
 def refresh_default_cards_catalog():
-    print("Starting Scryfall default-cards refresh...")
+    log("Starting Scryfall default-cards refresh...")
     url = fetch_latest_default_cards_url()
-    print(f"Downloading catalog from: {url}")
+    log(f"Downloading catalog from: {url}")
     response = requests.get(url, timeout=90)
-    print(f"Download status: {response.status_code}, size={len(response.content)} bytes")
+    log(f"Download status: {response.status_code}, size={len(response.content)} bytes")
     response.raise_for_status()
     decompressed = gzip.decompress(response.content)
-    print(f"Decompressed payload size: {len(decompressed)} bytes")
+    log(f"Decompressed payload size: {len(decompressed)} bytes")
     lines = decompressed.decode("utf-8").splitlines()
-    print(f"Catalog line count: {len(lines)}")
+    log(f"Catalog line count: {len(lines)}")
 
     valid_records = []
     for line in lines:
@@ -477,7 +488,7 @@ def refresh_default_cards_catalog():
         conn.close()
 
     processed = len(valid_records)
-    print(f"Scryfall refresh complete: {processed} records processed.")
+    log(f"Scryfall refresh complete: {processed} records processed.")
     return processed
 
 
@@ -499,16 +510,26 @@ def needs_daily_sync(last_sync):
 
 
 def sync_if_needed():
+    log("Scheduled sync check triggered")
     conn = get_db_connection()
     last_sync = conn.execute(
         "SELECT synced_at FROM sync_log ORDER BY id DESC LIMIT 1"
     ).fetchone()
     conn.close()
 
+    last_sync_value = last_sync["synced_at"] if last_sync is not None else None
+    log(f"Last sync (UTC): {last_sync_value}")
     if last_sync is not None and not needs_daily_sync(last_sync["synced_at"]):
+        log("Last sync is less than 24 hours old; skipping refresh")
         return False
 
-    refresh_default_cards_catalog()
+    log("Sync needed; starting refresh")
+    try:
+        processed = refresh_default_cards_catalog()
+    except Exception as exc:
+        log(f"Scheduled sync FAILED: {exc!r}")
+        raise
+    log(f"Scheduled sync succeeded: {processed} records")
     return True
 
 
@@ -528,6 +549,8 @@ def schedule_daily_scryfall_sync():
         replace_existing=True,
     )
     scheduler.start()
+    job = scheduler.get_job("daily_scryfall_sync")
+    log(f"Daily Scryfall sync scheduler started; next run at {job.next_run_time}")
     SCHEDULER = scheduler
     return scheduler
 
@@ -541,13 +564,13 @@ def start_background_sync():
 
         def worker():
             global SYNC_THREAD
-            print("Background sync started")
+            log("Background sync started")
             try:
                 refresh_default_cards_catalog()
             finally:
                 with SYNC_LOCK:
                     SYNC_THREAD = None
-                print("Background sync finished")
+                log("Background sync finished")
 
         SYNC_THREAD = threading.Thread(target=worker, daemon=True)
         SYNC_THREAD.start()
@@ -980,13 +1003,13 @@ def card_detail(card_id):
     return render_template("card_detail.html", card=card, history=history)
 
 
-print("Starting app initialization...")
+log("Starting app initialization...")
 init_db()
 normalize_collection_quantities()
-print("Migrating product match metadata into cards...")
-print(f"Updated {migrate_product_matches_to_cards()} card rows with product match metadata.")
-print("Importing matched product rows into collection...")
-print(f"Imported {import_external_products_into_collection()} matched product rows into the collection.")
+log("Migrating product match metadata into cards...")
+log(f"Updated {migrate_product_matches_to_cards()} card rows with product match metadata.")
+log("Importing matched product rows into collection...")
+log(f"Imported {import_external_products_into_collection()} matched product rows into the collection.")
 conn = get_db_connection()
 conn.execute(
     """
@@ -1006,10 +1029,10 @@ conn.commit()
 conn.close()
 normalize_collection_quantities()
 sync_if_needed()
-print("Database initialized. Starting the daily Scryfall sync scheduler and a startup refresh if needed.")
+log("Database initialized. Starting the daily Scryfall sync scheduler and a startup refresh if needed.")
 schedule_daily_scryfall_sync()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
-    print(f"Launching Flask dev server on port {port}...")
+    log(f"Launching Flask dev server on port {port}...")
     app.run(debug=True, host="0.0.0.0", port=port)
