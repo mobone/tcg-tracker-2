@@ -146,8 +146,6 @@ body {
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
-.card-hover-wrap:hover .card-hover-image,
-.card-hover-wrap:focus-within .card-hover-image,
 .card-hover-wrap.is-hovered .card-hover-image {
   opacity: 1;
   transform: translateY(0);

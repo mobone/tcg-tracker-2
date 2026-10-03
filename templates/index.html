@@ -34,54 +34,47 @@
 
   <script>
     document.addEventListener('DOMContentLoaded', () => {
+      const HIDE_DELAY_MS = 1000;
       document.querySelectorAll('.card-hover-wrap').forEach((wrap) => {
         const trigger = wrap.querySelector('.card-hover-name');
         if (!trigger) return;
 
-        const clearAllHovers = () => {
-          document.querySelectorAll('.card-hover-wrap.is-hovered').forEach((item) => item.classList.remove('is-hovered'));
+        let hideTimer = null;
+        const cancelHide = () => {
+          clearTimeout(hideTimer);
+          hideTimer = null;
         };
-
+        const hideNow = () => {
+          cancelHide();
+          wrap.classList.remove('is-hovered');
+        };
+        const hideSoon = () => {
+          cancelHide();
+          hideTimer = setTimeout(hideNow, HIDE_DELAY_MS);
+        };
         const show = () => {
-          clearAllHovers();
+          document.querySelectorAll('.card-hover-wrap.is-hovered').forEach((item) => {
+            if (item !== wrap) item.classList.remove('is-hovered');
+          });
+          cancelHide();
           wrap.classList.add('is-hovered');
         };
-        const hide = () => wrap.classList.remove('is-hovered');
-
-        const handlePointerExit = (event) => {
-          const nextTarget = event.relatedTarget;
-          if (!nextTarget || !wrap.contains(nextTarget)) {
-            document.querySelectorAll('.card-hover-wrap.is-hovered').forEach((item) => item.classList.remove('is-hovered'));
-            hide();
-          }
-        };
-
         const handleActivation = () => {
-          clearAllHovers();
-          hide();
+          hideNow();
           trigger.blur();
-          setTimeout(hide, 0);
         };
 
-        trigger.addEventListener('mouseenter', show);
-        trigger.addEventListener('mouseleave', hide);
-        trigger.addEventListener('mouseout', handlePointerExit);
-        trigger.addEventListener('pointerleave', hide);
+        wrap.addEventListener('mouseenter', show);
+        wrap.addEventListener('mouseleave', hideSoon);
+        trigger.addEventListener('focus', show);
+        trigger.addEventListener('blur', hideSoon);
         trigger.addEventListener('click', handleActivation);
         trigger.addEventListener('mousedown', handleActivation);
-        trigger.addEventListener('focus', show);
-        trigger.addEventListener('blur', hide);
-        wrap.addEventListener('mouseenter', show);
-        wrap.addEventListener('mouseleave', hide);
-        wrap.addEventListener('mouseout', handlePointerExit);
-        wrap.addEventListener('pointerleave', hide);
-        wrap.addEventListener('click', handleActivation);
-        wrap.addEventListener('mousedown', handleActivation);
 
         const modal = document.getElementById(trigger.getAttribute('data-bs-target')?.replace('#', ''));
         if (modal) {
-          modal.addEventListener('shown.bs.modal', hide);
-          modal.addEventListener('hidden.bs.modal', hide);
+          modal.addEventListener('shown.bs.modal', hideNow);
+          modal.addEventListener('hidden.bs.modal', hideNow);
         }
       });
 

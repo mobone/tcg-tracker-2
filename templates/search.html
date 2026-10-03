@@ -50,7 +50,7 @@
                     <input type="hidden" name="card_id" value="{{ card.variants.nonfoil.id }}" />
                     <input type="hidden" name="quantity" value="1" />
                     <input type="hidden" name="search_q" value="{{ query or '' }}" />
-                    <button class="btn btn-sm btn-outline-primary" type="submit">Add nonfoil ${{ '%.2f' | format(card.variants.nonfoil.price_usd or 0) }}</button>
+                    <button class="btn btn-sm btn-primary" type="submit">Add nonfoil ${{ '%.2f' | format(card.variants.nonfoil.price_usd or 0) }}</button>
                   </form>
                 {% endif %}
               </div>
@@ -98,7 +98,7 @@
                               <input type="hidden" name="card_id" value="{{ card.variants.nonfoil.id }}" />
                               <input type="hidden" name="quantity" value="1" />
                               <input type="hidden" name="search_q" value="{{ query or '' }}" />
-                              <button class="btn btn-outline-primary" type="submit">Add nonfoil</button>
+                              <button class="btn btn-primary" type="submit">Add nonfoil</button>
                             </form>
                           {% endif %}
                           {% if card.variants.foil is defined or card.variants.nonfoil is defined %}

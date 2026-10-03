@@ -665,6 +665,12 @@ def get_search_results(query):
         if not entry["image_url"]:
             entry["image_url"] = row["image_url"]
 
+    # Drop finishes with no price (e.g. no non-foil exists) unless nothing else is available
+    for entry in grouped.values():
+        priced = {k: v for k, v in entry["variants"].items() if v["price_usd"] is not None}
+        if priced:
+            entry["variants"] = priced
+
     return list(grouped.values())
 
 
