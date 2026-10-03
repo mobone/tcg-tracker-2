@@ -38,15 +38,51 @@
         const trigger = wrap.querySelector('.card-hover-name');
         if (!trigger) return;
 
-        const show = () => wrap.classList.add('is-hovered');
+        const clearAllHovers = () => {
+          document.querySelectorAll('.card-hover-wrap.is-hovered').forEach((item) => item.classList.remove('is-hovered'));
+        };
+
+        const show = () => {
+          clearAllHovers();
+          wrap.classList.add('is-hovered');
+        };
         const hide = () => wrap.classList.remove('is-hovered');
+
+        const handlePointerExit = (event) => {
+          const nextTarget = event.relatedTarget;
+          if (!nextTarget || !wrap.contains(nextTarget)) {
+            document.querySelectorAll('.card-hover-wrap.is-hovered').forEach((item) => item.classList.remove('is-hovered'));
+            hide();
+          }
+        };
+
+        const handleActivation = () => {
+          clearAllHovers();
+          hide();
+          trigger.blur();
+          setTimeout(hide, 0);
+        };
 
         trigger.addEventListener('mouseenter', show);
         trigger.addEventListener('mouseleave', hide);
+        trigger.addEventListener('mouseout', handlePointerExit);
+        trigger.addEventListener('pointerleave', hide);
+        trigger.addEventListener('click', handleActivation);
+        trigger.addEventListener('mousedown', handleActivation);
         trigger.addEventListener('focus', show);
         trigger.addEventListener('blur', hide);
         wrap.addEventListener('mouseenter', show);
         wrap.addEventListener('mouseleave', hide);
+        wrap.addEventListener('mouseout', handlePointerExit);
+        wrap.addEventListener('pointerleave', hide);
+        wrap.addEventListener('click', handleActivation);
+        wrap.addEventListener('mousedown', handleActivation);
+
+        const modal = document.getElementById(trigger.getAttribute('data-bs-target')?.replace('#', ''));
+        if (modal) {
+          modal.addEventListener('shown.bs.modal', hide);
+          modal.addEventListener('hidden.bs.modal', hide);
+        }
       });
 
       const collectionTable = document.getElementById('collection-table');
@@ -115,7 +151,12 @@
               <tr>
                 <td data-sort-value="{{ row.name|lower }}">
                   <div class="card-hover-wrap">
-                    <button type="button" class="btn btn-link text-start p-0 fw-semibold card-hover-name">
+                    <button
+                      type="button"
+                      class="btn btn-link text-start p-0 fw-semibold card-hover-name"
+                      data-bs-toggle="modal"
+                      data-bs-target="#collectionCardModal-{{ row.card_id }}"
+                    >
                       {{ row.name }}
                     </button>
                     {% if row.image_url %}
@@ -133,6 +174,41 @@
                 <td data-sort-value="{{ (row.quantity or 1) * (row.price_usd or 0) }}">${{ '%.2f' | format((row.quantity or 1) * (row.price_usd or 0)) }}</td>
                 <td data-sort-value="history"><a class="btn btn-sm btn-outline-light" href="{{ url_for('card_detail', card_id=row.card_id) }}">View</a></td>
               </tr>
+
+              <div class="modal fade" id="collectionCardModal-{{ row.card_id }}" tabindex="-1" aria-labelledby="collectionCardModalLabel-{{ row.card_id }}" aria-hidden="true">
+                <div class="modal-dialog modal-lg modal-dialog-centered">
+                  <div class="modal-content bg-dark text-light border-secondary">
+                    <div class="modal-header border-secondary">
+                      <h5 class="modal-title" id="collectionCardModalLabel-{{ row.card_id }}">{{ row.name }}</h5>
+                      <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                      <div class="row g-4 align-items-center">
+                        <div class="col-md-5 text-center">
+                          {% if row.image_url %}
+                            <img src="{{ row.image_url }}" alt="{{ row.name }}" class="img-fluid rounded shadow" style="max-height: 380px;" />
+                          {% else %}
+                            <div class="empty-state">
+                              <p>No image available for this card.</p>
+                            </div>
+                          {% endif %}
+                        </div>
+                        <div class="col-md-7">
+                          <div class="mb-2 text-secondary">{{ row.set_name or row.set_code }} · #{{ row.collector_number }} · {{ 'Foil' if row.foil else 'Non-foil' }}</div>
+                          <ul class="list-group list-group-flush">
+                            <li class="list-group-item bg-transparent text-light border-secondary">Current price: ${{ '%.2f' | format(row.price_usd or 0) }}</li>
+                            <li class="list-group-item bg-transparent text-light border-secondary">Percent change: {{ '%+.2f' | format(row.percent_change or 0) }}%</li>
+                            <li class="list-group-item bg-transparent text-light border-secondary">Quantity: {{ row.quantity }}</li>
+                          </ul>
+                          <div class="d-flex gap-2 mt-3 flex-wrap">
+                            <a class="btn btn-outline-light" href="{{ url_for('card_detail', card_id=row.card_id) }}">View full history</a>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             {% endfor %}
           </tbody>
         </table>

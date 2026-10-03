@@ -107,7 +107,7 @@ class SearchResultModalTests(unittest.TestCase):
         self.assertIn(b'Yawgmoth, Thran Physician', response.data)
         self.assertIn(b'The Emperor, Hell Tyrant', response.data)
 
-    def test_search_results_render_clickable_modal(self):
+    def test_search_results_render_clickable_names_with_modal(self):
         conn = sqlite3.connect(app.app.config["DATABASE"])
         conn.execute(
             "INSERT INTO cards (name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -120,6 +120,7 @@ class SearchResultModalTests(unittest.TestCase):
         response = client.get("/search?q=Lotus+Petal")
 
         self.assertEqual(response.status_code, 200)
+        self.assertIn(b'card-hover-name', response.data)
         self.assertIn(b'data-bs-toggle="modal"', response.data)
         self.assertIn(b'Lotus Petal', response.data)
         self.assertIn(b'Limited Edition Alpha', response.data)

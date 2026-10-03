@@ -101,7 +101,8 @@
                               <button class="btn btn-outline-primary" type="submit">Add nonfoil</button>
                             </form>
                           {% endif %}
-                          {% if first_variant %}
+                          {% if card.variants.foil is defined or card.variants.nonfoil is defined %}
+                            {% set first_variant = card.variants.foil if card.variants.foil is defined else card.variants.nonfoil %}
                             <a class="btn btn-outline-light" href="{{ url_for('card_detail', card_id=first_variant.id) }}">View full history</a>
                           {% endif %}
                         </div>
@@ -127,15 +128,51 @@
         const trigger = wrap.querySelector('.card-hover-name');
         if (!trigger) return;
 
-        const show = () => wrap.classList.add('is-hovered');
+        const clearAllHovers = () => {
+          document.querySelectorAll('.card-hover-wrap.is-hovered').forEach((item) => item.classList.remove('is-hovered'));
+        };
+
+        const show = () => {
+          clearAllHovers();
+          wrap.classList.add('is-hovered');
+        };
         const hide = () => wrap.classList.remove('is-hovered');
+
+        const handlePointerExit = (event) => {
+          const nextTarget = event.relatedTarget;
+          if (!nextTarget || !wrap.contains(nextTarget)) {
+            document.querySelectorAll('.card-hover-wrap.is-hovered').forEach((item) => item.classList.remove('is-hovered'));
+            hide();
+          }
+        };
+
+        const handleActivation = () => {
+          clearAllHovers();
+          hide();
+          trigger.blur();
+          setTimeout(hide, 0);
+        };
 
         trigger.addEventListener('mouseenter', show);
         trigger.addEventListener('mouseleave', hide);
+        trigger.addEventListener('mouseout', handlePointerExit);
+        trigger.addEventListener('pointerleave', hide);
+        trigger.addEventListener('click', handleActivation);
+        trigger.addEventListener('mousedown', handleActivation);
         trigger.addEventListener('focus', show);
         trigger.addEventListener('blur', hide);
         wrap.addEventListener('mouseenter', show);
         wrap.addEventListener('mouseleave', hide);
+        wrap.addEventListener('mouseout', handlePointerExit);
+        wrap.addEventListener('pointerleave', hide);
+        wrap.addEventListener('click', handleActivation);
+        wrap.addEventListener('mousedown', handleActivation);
+
+        const modal = document.getElementById(trigger.getAttribute('data-bs-target')?.replace('#', ''));
+        if (modal) {
+          modal.addEventListener('shown.bs.modal', hide);
+          modal.addEventListener('hidden.bs.modal', hide);
+        }
       });
     });
   </script>
