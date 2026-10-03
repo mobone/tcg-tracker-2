@@ -4,7 +4,7 @@ services:
   mtg-tracker:
     build: .
     container_name: mtg-tracker
-    restart: unless-stopped
+    restart: always
     ports:
       - "5000:5000"
     environment:
