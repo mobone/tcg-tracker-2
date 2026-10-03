@@ -982,6 +982,35 @@ def add_to_collection():
     return save_search_cookie(response, search_q)
 
 
+@app.route("/remove-from-collection", methods=["POST"])
+def remove_from_collection():
+    collection_id = request.form.get("collection_id", type=int)
+    if collection_id is None:
+        flash("Choose a collection entry to delete.")
+        return redirect(url_for("index"))
+
+    conn = get_db_connection()
+    row = conn.execute(
+        """
+        SELECT cards.name, cards.set_code
+        FROM collection
+        JOIN cards ON cards.id = collection.card_id
+        WHERE collection.id = ?
+        """,
+        (collection_id,),
+    ).fetchone()
+    deleted = conn.execute("DELETE FROM collection WHERE id = ?", (collection_id,)).rowcount
+    conn.commit()
+    conn.close()
+
+    if deleted and row:
+        log(f"Removed collection entry {collection_id}: {row['name']} ({row['set_code']})")
+        flash(f"Removed {row['name']} ({row['set_code']}) from your collection.")
+    else:
+        flash("That collection entry could not be found.")
+    return redirect(url_for("index"))
+
+
 @app.route("/sync-scryfall", methods=["POST"])
 def sync_scryfall():
     if not start_background_sync():

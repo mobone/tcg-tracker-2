@@ -195,6 +195,10 @@
                           </ul>
                           <div class="d-flex gap-2 mt-3 flex-wrap">
                             <a class="btn btn-outline-light" href="{{ url_for('card_detail', card_id=row.card_id) }}">View full history</a>
+                            <form method="POST" action="{{ url_for('remove_from_collection') }}" onsubmit='return confirm({{ ("Delete " ~ row.name ~ " from your collection?")|tojson }});'>
+                              <input type="hidden" name="collection_id" value="{{ row.collection_id }}" />
+                              <button class="btn btn-danger" type="submit">Delete</button>
+                            </form>
                           </div>
                         </div>
                       </div>
