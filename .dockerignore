@@ -9,4 +9,3 @@ venv/
 .pytest_cache/
 Mypy_cache/
 .DS_Store
-*.db
