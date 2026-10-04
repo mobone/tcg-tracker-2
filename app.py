@@ -855,6 +855,7 @@ def get_search_results(query):
                 "set_name": row["set_name"],
                 "collector_number": row["collector_number"],
                 "image_url": row["image_url"],
+                "is_sealed": bool(row["is_sealed"]),
                 "variants": {},
             },
         )
@@ -875,7 +876,11 @@ def get_search_results(query):
         if priced:
             entry["variants"] = priced
 
-    return list(grouped.values())
+    results = list(grouped.values())
+    sealed_count = sum(1 for entry in results if entry["is_sealed"])
+    if results and sealed_count * 2 > len(results):
+        results.sort(key=lambda entry: (entry["name"].lower(), entry["set_code"]))
+    return results
 
 
 def parse_history_date(value):
