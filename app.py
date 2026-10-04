@@ -544,7 +544,7 @@ def schedule_daily_scryfall_sync():
         sync_if_needed,
         "cron",
         hour=5,
-        minute=1,
+        minute=0,
         id="daily_scryfall_sync",
         replace_existing=True,
     )
