@@ -39,7 +39,7 @@
                   <img class="card-hover-image" src="{{ card.image_url }}" alt="{{ card.name }}" />
                 {% endif %}
                 <div class="small text-secondary">
-                  {{ card.set_name or (card.set_code|upper) }} Â· {{ card.collector_number }}
+                  {{ card.set_name or (card.set_code|upper) }} · {{ card.collector_number }}
                 </div>
               </div>
               <div class="d-flex align-items-center gap-2 flex-wrap">
@@ -81,7 +81,7 @@
                         {% endif %}
                       </div>
                       <div class="col-md-7">
-                        <div class="mb-2 text-secondary">{{ card.set_name or (card.set_code|upper) }} Â· #{{ card.collector_number }}</div>
+                        <div class="mb-2 text-secondary">{{ card.set_name or (card.set_code|upper) }} · #{{ card.collector_number }}</div>
                         <ul class="list-group list-group-flush">
                           {% if card.variants.foil is defined %}
                             <li class="list-group-item bg-transparent text-light border-secondary">Foil price: ${{ '%.2f' | format(card.variants.foil.price_usd or 0) }}</li>
@@ -130,7 +130,7 @@
                   {% endif %}
                 </button>
                 <div class="fw-semibold mt-2">{{ card.name }}</div>
-                <div class="small text-secondary mb-2">{{ card.set_name or (card.set_code|upper) }} Â· {{ card.collector_number }}</div>
+                <div class="small text-secondary mb-2">{{ card.set_name or (card.set_code|upper) }} · {{ card.collector_number }}</div>
                 <div class="d-flex gap-2 flex-wrap justify-content-center">
                   {% for key, label in [('foil', 'foil'), ('nonfoil', 'nonfoil')] %}
                     {% if card.variants[key] is defined %}

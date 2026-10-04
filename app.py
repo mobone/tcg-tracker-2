@@ -871,18 +871,26 @@ def get_search_results(query):
     if not query:
         return []
 
+    tokens = query.split()
+    haystack = (
+        "lower(name || ' ' || COALESCE(flavor_name, '') || ' ' || "
+        "COALESCE(set_name, '') || ' ' || set_code)"
+    )
+    where_clause = " AND ".join(f"{haystack} LIKE lower(?) ESCAPE '\\'" for _ in tokens)
+    params = [
+        "%" + token.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        for token in tokens
+    ]
+
     conn = get_db_connection()
     search_results = conn.execute(
-        """
+        f"""
         SELECT *
         FROM cards
-        WHERE lower(name) LIKE lower(?)
-           OR lower(COALESCE(flavor_name, '')) LIKE lower(?)
-           OR lower(COALESCE(flavor_name, '') || ' - ' || name) LIKE lower(?)
-           OR lower(name || ' - ' || COALESCE(flavor_name, '')) LIKE lower(?)
+        WHERE {where_clause}
         ORDER BY COALESCE(price_usd, 0) DESC, name ASC, set_code ASC, collector_number ASC
         """,
-        (f"%{query}%",) * 4,
+        params,
     ).fetchall()
     conn.close()
 
