@@ -4,6 +4,3 @@ venv/
 *.pyc
 *.pyo
 *.gz
-*.db
-data/*.db-shm
-data/*.db-wal
