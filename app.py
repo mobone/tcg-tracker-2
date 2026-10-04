@@ -1012,14 +1012,30 @@ def get_analytics_data(period="all"):
         finish_totals[finish_label]["quantity"] += row["quantity"] or 1
         finish_totals[finish_label]["total_value"] += (row["quantity"] or 1) * (row["price_usd"] or 0)
 
-    trend_totals = {}
+    # Like-for-like trend: only cards that already had a price on the first date in the
+    # window, so newly added cards/products don't register as value change.
+    card_prices_by_date = {}
     for row in filtered_history_rows:
-        card_id = row["card_id"]
-        if card_id not in collection_qty:
-            continue
-        date_key = row["recorded_at"]
-        trend_totals.setdefault(date_key, 0.0)
-        trend_totals[date_key] += float(row["price_usd"] or 0) * collection_qty[card_id]
+        if row["card_id"] in collection_qty:
+            card_prices_by_date.setdefault(row["card_id"], {})[row["recorded_at"]] = float(row["price_usd"] or 0)
+
+    first_date = min(
+        (date for prices in card_prices_by_date.values() for date in prices), default=None
+    )
+    cohort = {
+        card_id: prices
+        for card_id, prices in card_prices_by_date.items()
+        if first_date in prices
+    }
+    all_dates = sorted({date for prices in cohort.values() for date in prices})
+
+    trend_totals = {}
+    for card_id, prices in cohort.items():
+        last_price = None
+        for date in all_dates:
+            if date in prices:
+                last_price = prices[date]
+            trend_totals[date] = trend_totals.get(date, 0.0) + last_price * collection_qty[card_id]
 
     ordered_trend = [
         {"date": date, "total_value": round(float(value), 2)}
