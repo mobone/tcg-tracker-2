@@ -1057,8 +1057,8 @@ conn.execute(
 conn.commit()
 conn.close()
 normalize_collection_quantities()
-sync_if_needed()
-log("Database initialized. Starting the daily Scryfall sync scheduler and a startup refresh if needed.")
+start_background_sync()
+log("Database initialized. Startup refresh running in the background; starting the daily Scryfall sync scheduler.")
 schedule_daily_scryfall_sync()
 
 if __name__ == "__main__":
