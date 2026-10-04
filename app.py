@@ -520,6 +520,7 @@ def refresh_default_cards_catalog():
 
 
 TCGPLAYER_API = "https://api.tcgplayer.com"
+TCGPLAYER_MIN_SYNC_SECONDS = 12 * 3600
 
 
 def get_tcgplayer_token():
@@ -540,8 +541,27 @@ def get_tcgplayer_token():
     return response.json()["access_token"]
 
 
-def refresh_tcgplayer_sealed_products():
+def scheduled_tcgplayer_sync():
+    try:
+        # Slack so a run exactly 12h after the previous one isn't skipped by a few minutes
+        refresh_tcgplayer_sealed_products(min_age_seconds=TCGPLAYER_MIN_SYNC_SECONDS - 1800)
+    except Exception as exc:
+        log(f"Scheduled TCGplayer sealed sync FAILED: {exc!r}")
+
+
+def refresh_tcgplayer_sealed_products(min_age_seconds=TCGPLAYER_MIN_SYNC_SECONDS):
     """Fetch MTG sealed products from TCGplayer and store them alongside cards."""
+    conn = get_db_connection()
+    last_row = conn.execute(
+        "SELECT MAX(last_updated) AS last_updated FROM cards WHERE is_sealed = 1"
+    ).fetchone()
+    conn.close()
+    if last_row["last_updated"]:
+        last_updated = datetime.strptime(last_row["last_updated"], "%Y-%m-%d %H:%M:%S")
+        if (datetime.utcnow() - last_updated).total_seconds() < min_age_seconds:
+            log("TCGplayer sealed data is less than 12 hours old; skipping sync")
+            return 0
+
     token = get_tcgplayer_token()
     if not token:
         log("TCGplayer keys not configured; skipping sealed product sync")
@@ -677,10 +697,6 @@ def sync_if_needed():
     except Exception as exc:
         log(f"Scheduled sync FAILED: {exc!r}")
         raise
-    try:
-        refresh_tcgplayer_sealed_products()
-    except Exception as exc:
-        log(f"TCGplayer sealed sync FAILED: {exc!r}")
     log(f"Scheduled sync succeeded: {processed} records")
     return True
 
@@ -700,9 +716,17 @@ def schedule_daily_scryfall_sync():
         id="daily_scryfall_sync",
         replace_existing=True,
     )
+    scheduler.add_job(
+        scheduled_tcgplayer_sync,
+        "interval",
+        hours=12,
+        id="tcgplayer_sealed_sync",
+        replace_existing=True,
+    )
     scheduler.start()
     job = scheduler.get_job("daily_scryfall_sync")
     log(f"Daily Scryfall sync scheduler started; next run at {job.next_run_time}")
+    log(f"TCGplayer sealed sync scheduled every 12 hours; next run at {scheduler.get_job('tcgplayer_sealed_sync').next_run_time}")
     SCHEDULER = scheduler
     return scheduler
 
