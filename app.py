@@ -18,6 +18,13 @@ SCRYFALL_DEFAULT_CARDS_URL = (
     "https://data.scryfall.io/default-cards/default-cards-20261002210553.jsonl.gz"
 )
 
+_env_file = BASE_DIR / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        if "=" in _line and not _line.lstrip().startswith("#"):
+            _key, _value = _line.split("=", 1)
+            os.environ.setdefault(_key.strip(), _value.strip().strip("'\""))
+
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "dev-secret-key-change-me"
 app.config["DATABASE"] = str(DB_PATH)
@@ -85,6 +92,8 @@ def init_db():
         "match_score": "INTEGER",
         "match_method": "TEXT",
         "is_matched": "INTEGER DEFAULT 0",
+        "is_sealed": "INTEGER DEFAULT 0",
+        "tcgplayer_product_id": "INTEGER",
     }.items():
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE cards ADD COLUMN {column_name} {column_sql}")
@@ -510,6 +519,127 @@ def refresh_default_cards_catalog():
     return processed
 
 
+TCGPLAYER_API = "https://api.tcgplayer.com"
+
+
+def get_tcgplayer_token():
+    public_key = os.getenv("TCGPLAYER_PUBLIC_KEY")
+    private_key = os.getenv("TCGPLAYER_PRIVATE_KEY")
+    if not public_key or not private_key:
+        return None
+    response = requests.post(
+        f"{TCGPLAYER_API}/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": public_key,
+            "client_secret": private_key,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()["access_token"]
+
+
+def refresh_tcgplayer_sealed_products():
+    """Fetch MTG sealed products from TCGplayer and store them alongside cards."""
+    token = get_tcgplayer_token()
+    if not token:
+        log("TCGplayer keys not configured; skipping sealed product sync")
+        return 0
+    headers = {"Authorization": f"bearer {token}"}
+
+    def get_json(path, params=None):
+        resp = requests.get(f"{TCGPLAYER_API}{path}", headers=headers, params=params, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+
+    groups = {}
+    offset = 0
+    while True:
+        data = get_json("/catalog/categories/1/groups", {"limit": 100, "offset": offset})
+        results = data.get("results") or []
+        for group in results:
+            groups[group["groupId"]] = group
+        offset += len(results)
+        if not results or offset >= data.get("totalItems", 0):
+            break
+
+    products = []
+    offset = 0
+    while True:
+        data = get_json(
+            "/catalog/products",
+            {"categoryId": 1, "productTypes": "Sealed Products", "limit": 100, "offset": offset},
+        )
+        results = data.get("results") or []
+        products.extend(results)
+        offset += len(results)
+        if not results or offset >= data.get("totalItems", 0):
+            break
+    log(f"TCGplayer returned {len(products)} sealed products")
+
+    prices = {}
+    for start in range(0, len(products), 250):
+        ids = ",".join(str(p["productId"]) for p in products[start:start + 250])
+        data = get_json(f"/pricing/product/{ids}")
+        for entry in data.get("results") or []:
+            if entry.get("subTypeName") != "Normal":
+                continue
+            price = entry.get("marketPrice")
+            if price is None:
+                price = entry.get("midPrice")
+            prices[entry["productId"]] = price
+
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    conn = get_db_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for product in products:
+            product_id = product["productId"]
+            group = groups.get(product.get("groupId")) or {}
+            set_code = (group.get("abbreviation") or "sealed").lower()
+            set_name = group.get("name") or "Sealed Product"
+            image_url = (product.get("imageUrl") or "").replace("_200w", "_400w") or None
+            price = prices.get(product_id)
+            collector_number = f"tcg-{product_id}"
+            conn.execute(
+                """
+                INSERT INTO cards (name, set_code, set_name, collector_number, foil, price_usd,
+                                   image_url, last_updated, is_sealed, tcgplayer_product_id)
+                VALUES (?, ?, ?, ?, 0, ?, ?, ?, 1, ?)
+                ON CONFLICT(name, set_code, collector_number, foil)
+                DO UPDATE SET set_name = excluded.set_name,
+                              price_usd = excluded.price_usd,
+                              image_url = excluded.image_url,
+                              last_updated = excluded.last_updated,
+                              is_sealed = 1,
+                              tcgplayer_product_id = excluded.tcgplayer_product_id
+                """,
+                (product["name"], set_code, set_name, collector_number, price, image_url, now, product_id),
+            )
+            if price is None:
+                continue
+            card_row = conn.execute(
+                "SELECT id FROM cards WHERE name = ? AND set_code = ? AND collector_number = ? AND foil = 0",
+                (product["name"], set_code, collector_number),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO price_history (card_id, recorded_at, foil, price_usd)
+                VALUES (?, ?, 0, ?)
+                ON CONFLICT(card_id, recorded_at, foil)
+                DO UPDATE SET price_usd = excluded.price_usd
+                """,
+                (card_row["id"], today, price),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    log(f"TCGplayer sealed sync complete: {len(products)} products")
+    return len(products)
+
+
 def needs_daily_sync(last_sync):
     if last_sync is None:
         return True
@@ -547,6 +677,10 @@ def sync_if_needed():
     except Exception as exc:
         log(f"Scheduled sync FAILED: {exc!r}")
         raise
+    try:
+        refresh_tcgplayer_sealed_products()
+    except Exception as exc:
+        log(f"TCGplayer sealed sync FAILED: {exc!r}")
     log(f"Scheduled sync succeeded: {processed} records")
     return True
 
@@ -585,6 +719,10 @@ def start_background_sync():
             log("Background sync started")
             try:
                 refresh_default_cards_catalog()
+                try:
+                    refresh_tcgplayer_sealed_products()
+                except Exception as exc:
+                    log(f"TCGplayer sealed sync FAILED: {exc!r}")
             finally:
                 with SYNC_LOCK:
                     SYNC_THREAD = None
