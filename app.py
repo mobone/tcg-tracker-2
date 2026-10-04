@@ -316,16 +316,20 @@ def import_external_products_into_collection():
 
 def fetch_latest_default_cards_url():
     try:
-        bulk_response = requests.get("https://api.scryfall.io/bulk-data", timeout=30)
+        bulk_response = requests.get("https://api.scryfall.com/bulk-data", timeout=30)
         bulk_response.raise_for_status()
         bulk_data = bulk_response.json()
         for item in bulk_data.get("data", []):
             if item.get("type") == "default_cards":
-                log("Using Scryfall default cards URL:", item.get("download_uri"))
-                return item.get("download_uri") or SCRYFALL_DEFAULT_CARDS_URL
-    except requests.RequestException:
-        pass
+                download_url = item.get("jsonl_download_uri") or item.get("download_uri")
+                if download_url:
+                    log(f"Using Scryfall default cards URL: {download_url}")
+                    return download_url
+    except (requests.RequestException, ValueError) as exc:
+        log(f"Bulk-data lookup failed, using fallback URL: {exc!r}")
+    log("WARNING: using hardcoded fallback default cards URL; prices may be stale")
     return SCRYFALL_DEFAULT_CARDS_URL
+
 
 
 def normalize_search_query(raw_query):
