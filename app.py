@@ -660,6 +660,48 @@ def refresh_tcgplayer_sealed_products(min_age_seconds=TCGPLAYER_MIN_SYNC_SECONDS
     return len(products)
 
 
+def import_sealed_products_into_collection():
+    """Add sealed products from tcg_collection.db whose TCGplayer id matches a synced sealed product."""
+    product_db_path = BASE_DIR / "tcg_collection.db"
+    if not product_db_path.exists():
+        return 0
+
+    product_conn = sqlite3.connect(str(product_db_path))
+    product_conn.row_factory = sqlite3.Row
+    app_conn = get_db_connection()
+    rows = product_conn.execute(
+        """
+        SELECT tcg_id, SUM(CAST(quantity AS INTEGER)) AS total_quantity
+        FROM products
+        WHERE tcg_id IS NOT NULL
+        GROUP BY tcg_id
+        """
+    ).fetchall()
+
+    imported = 0
+    for row in rows:
+        card = app_conn.execute(
+            "SELECT id FROM cards WHERE is_sealed = 1 AND tcgplayer_product_id = ?",
+            (row["tcg_id"],),
+        ).fetchone()
+        if card is None:
+            continue
+        qty = max(int(row["total_quantity"] or 1), 1)
+        if app_conn.execute(
+            "SELECT 1 FROM collection WHERE card_id = ?", (card["id"],)
+        ).fetchone() is None:
+            app_conn.execute(
+                "INSERT INTO collection (card_id, quantity) VALUES (?, ?)",
+                (card["id"], qty),
+            )
+            imported += 1
+
+    app_conn.commit()
+    app_conn.close()
+    product_conn.close()
+    return imported
+
+
 def needs_daily_sync(last_sync):
     if last_sync is None:
         return True
@@ -1224,6 +1266,7 @@ log("Migrating product match metadata into cards...")
 log(f"Updated {migrate_product_matches_to_cards()} card rows with product match metadata.")
 log("Importing matched product rows into collection...")
 log(f"Imported {import_external_products_into_collection()} matched product rows into the collection.")
+log(f"Imported {import_sealed_products_into_collection()} sealed products into the collection.")
 conn = get_db_connection()
 conn.execute(
     """
