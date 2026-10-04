@@ -519,9 +519,9 @@ def sync_if_needed():
 
     last_sync_value = last_sync["synced_at"] if last_sync is not None else None
     log(f"Last sync (UTC): {last_sync_value}")
-    if last_sync is not None and not needs_daily_sync(last_sync["synced_at"]):
-        log("Last sync is less than 24 hours old; skipping refresh")
-        return False
+    #if last_sync is not None and not needs_daily_sync(last_sync["synced_at"]):
+    #    log("Last sync is less than 24 hours old; skipping refresh")
+    #    return False
 
     log("Sync needed; starting refresh")
     try:
