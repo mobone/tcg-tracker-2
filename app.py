@@ -316,6 +316,20 @@ def import_external_products_into_collection():
 
 def fetch_latest_default_cards_url():
     try:
+        page = requests.get("https://scryfall.com/docs/api/bulk-data", timeout=30)
+        page.raise_for_status()
+        match = re.search(
+            r'https://data\.scryfall\.io/default-cards/default-cards-\d+\.jsonl\.gz',
+            page.text,
+        )
+        if match:
+            log(f"Using Scryfall default cards URL from docs page: {match.group(0)}")
+            return match.group(0)
+        log("Default Cards link not found on docs page; trying bulk-data API")
+    except requests.RequestException as exc:
+        log(f"Docs page lookup failed: {exc!r}")
+
+    try:
         bulk_response = requests.get("https://api.scryfall.com/bulk-data", timeout=30)
         bulk_response.raise_for_status()
         bulk_data = bulk_response.json()
