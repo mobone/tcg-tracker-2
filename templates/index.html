@@ -98,6 +98,28 @@
       const tbody = collectionTable.querySelector('tbody');
       const headers = collectionTable.querySelectorAll('th[data-sort-key]');
 
+      const sortSelect = document.getElementById('sort-by');
+      const sortDir = document.getElementById('sort-dir');
+      const grid = document.querySelector('#collection-view .search-card-grid');
+      const applyDropdownSort = () => {
+        const key = sortSelect.value;
+        if (!key) return;
+        const dir = sortDir.dataset.dir === 'asc' ? 1 : -1;
+        const compare = (a, b) => {
+          if (key === 'price') return (Number(a.dataset.price) - Number(b.dataset.price)) * dir;
+          return a.dataset[key].localeCompare(b.dataset[key], undefined, { numeric: true, sensitivity: 'base' }) * dir;
+        };
+        headers.forEach((cell) => delete cell.dataset.direction);
+        Array.from(tbody.querySelectorAll('tr')).sort(compare).forEach((row) => tbody.appendChild(row));
+        Array.from(grid.children).sort(compare).forEach((tile) => grid.appendChild(tile));
+      };
+      sortSelect.addEventListener('change', applyDropdownSort);
+      sortDir.addEventListener('click', () => {
+        sortDir.dataset.dir = sortDir.dataset.dir === 'asc' ? 'desc' : 'asc';
+        sortDir.innerHTML = sortDir.dataset.dir === 'asc' ? '&uarr;' : '&darr;';
+        applyDropdownSort();
+      });
+
       headers.forEach((header) => {
         header.addEventListener('click', () => {
           const direction = header.dataset.direction === 'asc' ? 'desc' : 'asc';
@@ -137,9 +159,19 @@
     <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-2">
       <h2>Collection</h2>
       {% if collection_rows %}
-        <div class="btn-group btn-group-sm" role="group" aria-label="Collection view">
-          <button type="button" class="btn btn-outline-light active" data-view-toggle="list">List</button>
-          <button type="button" class="btn btn-outline-light" data-view-toggle="cards">Cards</button>
+        <div class="d-flex align-items-center gap-2 flex-wrap">
+          <label for="sort-by" class="small text-secondary mb-0">Sort by</label>
+          <select id="sort-by" class="form-select form-select-sm bg-dark text-light border-secondary w-auto">
+            <option value="">Default</option>
+            <option value="name">Name</option>
+            <option value="set">Set</option>
+            <option value="price">Price</option>
+          </select>
+          <button type="button" id="sort-dir" class="btn btn-sm btn-outline-light" data-dir="asc" title="Toggle sort direction">&uarr;</button>
+          <div class="btn-group btn-group-sm" role="group" aria-label="Collection view">
+            <button type="button" class="btn btn-outline-light active" data-view-toggle="list">List</button>
+            <button type="button" class="btn btn-outline-light" data-view-toggle="cards">Cards</button>
+          </div>
         </div>
       {% endif %}
     </div>
@@ -147,7 +179,7 @@
      <div id="collection-view" data-view="list">
       <div class="search-card-grid">
         {% for row in collection_rows %}
-          <div class="search-card-tile">
+          <div class="search-card-tile" data-name="{{ row.name|lower }}" data-set="{{ row.set_code|lower }}" data-price="{{ row.price_usd or 0 }}">
             <button type="button" class="btn p-0 border-0 search-card-image" data-bs-toggle="modal" data-bs-target="#collectionCardModal-{{ row.card_id }}" aria-label="{{ row.name }}">
               {% if row.image_url %}
                 <img src="{{ row.image_url }}" alt="{{ row.name }}" loading="lazy" />
@@ -181,7 +213,7 @@
           </thead>
           <tbody>
             {% for row in collection_rows %}
-              <tr>
+              <tr data-name="{{ row.name|lower }}" data-set="{{ row.set_code|lower }}" data-price="{{ row.price_usd or 0 }}">
                 <td data-sort-value="{{ row.name|lower }}">
                   <div class="card-hover-wrap">
                     <button
