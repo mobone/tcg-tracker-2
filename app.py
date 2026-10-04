@@ -543,8 +543,8 @@ def schedule_daily_scryfall_sync():
     scheduler.add_job(
         sync_if_needed,
         "cron",
-        hour=6,
-        minute=0,
+        hour=5,
+        minute=1,
         id="daily_scryfall_sync",
         replace_existing=True,
     )
