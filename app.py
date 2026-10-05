@@ -89,6 +89,7 @@ def init_db():
         "matched_set_name": "TEXT",
         "matched_foil": "INTEGER",
         "scryfall_price_usd": "REAL",
+        "finish": "TEXT NOT NULL DEFAULT 'nonfoil'",
         "match_score": "INTEGER",
         "match_method": "TEXT",
         "is_matched": "INTEGER DEFAULT 0",
@@ -97,6 +98,15 @@ def init_db():
     }.items():
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE cards ADD COLUMN {column_name} {column_sql}")
+    conn.execute(
+        """
+        UPDATE cards
+        SET finish = CASE WHEN foil = 1 THEN 'foil' ELSE 'nonfoil' END
+        WHERE finish IS NULL
+           OR (finish = 'nonfoil' AND foil = 1)
+           OR (finish = 'foil' AND foil = 0)
+        """
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS collection (
@@ -412,29 +422,44 @@ def upsert_card_record(record, conn=None):
         return
 
     prices = record.get("prices") or {}
+    finish_details = {
+        "nonfoil": (0, "usd"),
+        "foil": (1, "usd_foil"),
+        "etched": (2, "usd_etched"),
+    }
+    available_finishes = record.get("finishes")
+    if not isinstance(available_finishes, list):
+        available_finishes = [
+            finish
+            for finish, (_, price_key) in finish_details.items()
+            if prices.get(price_key) is not None
+        ]
+        if not available_finishes:
+            available_finishes = ["nonfoil", "foil"]
     variants = []
-    for foil_flag, price_key in [(0, "usd"), (1, "usd_foil")]:
-        price_value = prices.get(price_key)
-        if price_value is None:
-            variants.append((foil_flag, None))
-        else:
-            variants.append((foil_flag, float(price_value)))
+    for finish in available_finishes:
+        if finish not in finish_details:
+            continue
+        foil_flag, price_key = finish_details[finish]
+        variants.append((finish, foil_flag, prices.get(price_key)))
 
     image_url = extract_image_url(record)
     close_conn = conn is None
     if conn is None:
         conn = get_db_connection()
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    for foil_flag, price_value in variants:
+    for finish, foil_flag, raw_price in variants:
+        price_value = float(raw_price) if raw_price is not None else None
         conn.execute(
             """
-            INSERT INTO cards (scryfall_id, name, flavor_name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO cards (scryfall_id, name, flavor_name, set_code, set_name, collector_number, foil, finish, price_usd, image_url, last_updated)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name, set_code, collector_number, foil)
             DO UPDATE SET
                 scryfall_id = excluded.scryfall_id,
                 flavor_name = excluded.flavor_name,
                 set_name = excluded.set_name,
+                finish = excluded.finish,
                 price_usd = excluded.price_usd,
                 image_url = excluded.image_url,
                 last_updated = excluded.last_updated
@@ -447,6 +472,7 @@ def upsert_card_record(record, conn=None):
                 set_name,
                 collector_number,
                 foil_flag,
+                finish,
                 price_value,
                 image_url,
                 now,
@@ -475,6 +501,7 @@ def upsert_card_record(record, conn=None):
             ),
         )
     if close_conn:
+        conn.commit()
         conn.close()
 
 
@@ -812,6 +839,7 @@ def get_collection_rows():
             cards.set_name,
             cards.collector_number,
             cards.foil,
+            cards.finish,
             cards.price_usd,
             cards.image_url,
             cards.last_updated
@@ -909,10 +937,10 @@ def get_search_results(query):
                 "variants": {},
             },
         )
-        finish = "foil" if row["foil"] else "nonfoil"
+        finish = row["finish"]
         entry["variants"][finish] = {
             "id": row["id"],
-            "foil": bool(row["foil"]),
+            "finish": finish,
             "price_usd": row["price_usd"],
             "image_url": row["image_url"],
             "last_updated": row["last_updated"],
@@ -920,13 +948,16 @@ def get_search_results(query):
         if not entry["image_url"]:
             entry["image_url"] = row["image_url"]
 
-    # Drop finishes with no price (e.g. no non-foil exists) unless nothing else is available
+    priced_entries = []
     for entry in grouped.values():
         priced = {k: v for k, v in entry["variants"].items() if v["price_usd"] is not None}
-        if priced:
-            entry["variants"] = priced
+        if not priced:
+            continue
+        entry["variants"] = priced
+        entry["first_variant_id"] = next(iter(priced.values()))["id"]
+        priced_entries.append(entry)
 
-    results = list(grouped.values())
+    results = priced_entries
     sealed_count = sum(1 for entry in results if entry["is_sealed"])
     if results and sealed_count * 2 > len(results):
         results.sort(key=lambda entry: (entry["name"].lower(), entry["set_code"]))
@@ -978,6 +1009,7 @@ def get_analytics_data(period="all"):
             cards.set_name,
             cards.collector_number,
             cards.foil,
+            cards.finish,
             cards.price_usd,
             cards.image_url
         FROM collection c
@@ -1015,7 +1047,7 @@ def get_analytics_data(period="all"):
         set_totals[set_label]["quantity"] += row["quantity"] or 1
         set_totals[set_label]["total_value"] += (row["quantity"] or 1) * (row["price_usd"] or 0)
 
-        finish_label = "Foil" if row["foil"] == 1 else "Non-foil"
+        finish_label = row["finish"].replace("_", " ").title()
         finish_totals.setdefault(finish_label, {"quantity": 0, "total_value": 0.0})
         finish_totals[finish_label]["quantity"] += row["quantity"] or 1
         finish_totals[finish_label]["total_value"] += (row["quantity"] or 1) * (row["price_usd"] or 0)
@@ -1116,8 +1148,9 @@ def get_analytics_data(period="all"):
         "summary": {
             "total_rows": len(collection_rows),
             "total_cards": sum(row["quantity"] or 1 for row in collection_rows),
-            "foil_cards": sum((row["quantity"] or 1) for row in collection_rows if row["foil"] == 1),
-            "nonfoil_cards": sum((row["quantity"] or 1) for row in collection_rows if row["foil"] == 0),
+            "foil_cards": sum((row["quantity"] or 1) for row in collection_rows if row["finish"] == "foil"),
+            "nonfoil_cards": sum((row["quantity"] or 1) for row in collection_rows if row["finish"] == "nonfoil"),
+            "etched_cards": sum((row["quantity"] or 1) for row in collection_rows if row["finish"] == "etched"),
             "total_value": round(current_collection_value, 2),
             "overall_change": round(overall_change, 2),
             "overall_percent_change": round(overall_percent_change, 2),
@@ -1198,7 +1231,7 @@ def analytics():
 @app.route("/add-to-collection", methods=["POST"])
 def add_to_collection():
     card_id = request.form.get("card_id", type=int)
-    quantity = request.form.get("quantity", type=int) or 1
+    quantity = max(1, min(request.form.get("quantity", type=int) or 1, 999))
     search_q = request.form.get("search_q") or request.cookies.get("last_search") or ""
     if card_id is None:
         flash("Choose a card before adding it to your collection.")
@@ -1227,7 +1260,7 @@ def add_to_collection():
     conn.commit()
     conn.close()
 
-    flash(f"Added {card['name']} ({card['set_code']}) to your collection.")
+    flash(f"Added {quantity} × {card['name']} ({card['set_code']}) to your collection.")
     target = url_for("search_page", q=search_q) if search_q else url_for("index")
     response = redirect(target)
     return save_search_cookie(response, search_q)
@@ -1285,7 +1318,8 @@ def card_detail(card_id):
 
 log("Starting app initialization...")
 init_db()
-normalize_collection_quantities()
+#normalize_collection_quantities()
+'''
 log("Migrating product match metadata into cards...")
 log(f"Updated {migrate_product_matches_to_cards()} card rows with product match metadata.")
 log("Importing matched product rows into collection...")
@@ -1308,7 +1342,9 @@ conn.execute(
 )
 conn.commit()
 conn.close()
-normalize_collection_quantities()
+
+'''
+#normalize_collection_quantities()
 start_background_sync()
 log("Database initialized. Startup refresh running in the background; starting the daily Scryfall sync scheduler.")
 schedule_daily_scryfall_sync()

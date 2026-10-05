@@ -148,5 +148,110 @@ class SearchResultModalTests(unittest.TestCase):
         self.assertIn(b'https://example.com/lotus-petal.jpg', response.data)
 
 
+class EtchedFinishTests(unittest.TestCase):
+    def setUp(self):
+        self.original_db = app.app.config["DATABASE"]
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        app.app.config["DATABASE"] = self.temp_db
+        app.init_db()
+
+    def tearDown(self):
+        app.app.config["DATABASE"] = self.original_db
+        if os.path.exists(self.temp_db):
+            os.remove(self.temp_db)
+
+    def test_etched_only_card_is_imported_and_shown_as_etched(self):
+        conn = sqlite3.connect(app.app.config["DATABASE"])
+        conn.executemany(
+            """
+            INSERT INTO cards (name, set_code, set_name, collector_number, foil, price_usd)
+            VALUES (?, 'cmm', 'Commander Masters', '611', ?, NULL)
+            """,
+            [("Jeweled Lotus", 0), ("Jeweled Lotus", 1)],
+        )
+        conn.commit()
+        conn.close()
+
+        app.upsert_card_record(
+            {
+                "id": "etched-card-id",
+                "name": "Jeweled Lotus",
+                "set": "cmm",
+                "set_name": "Commander Masters",
+                "collector_number": "611",
+                "finishes": ["etched"],
+                "prices": {
+                    "usd": None,
+                    "usd_foil": None,
+                    "usd_etched": "140.48",
+                },
+            }
+        )
+
+        results = app.get_search_results("Jeweled Lotus")
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(list(results[0]["variants"]), ["etched"])
+        etched = results[0]["variants"]["etched"]
+        self.assertEqual(etched["price_usd"], 140.48)
+        self.assertEqual(etched["finish"], "etched")
+
+        response = app.app.test_client().get("/search?q=Jeweled+Lotus")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Add Etched Foil $140.48", response.data)
+        self.assertIn(b"Etched price: $140.48", response.data)
+        self.assertNotIn(b"Add foil", response.data)
+        self.assertNotIn(b"Add nonfoil", response.data)
+
+    def test_card_without_any_market_price_is_hidden_from_search(self):
+        app.upsert_card_record(
+            {
+                "id": "unpriced-card-id",
+                "name": "Unpriced Card",
+                "set": "cmm",
+                "set_name": "Commander Masters",
+                "collector_number": "999",
+                "finishes": ["nonfoil", "foil", "etched"],
+                "prices": {
+                    "usd": None,
+                    "usd_foil": None,
+                    "usd_etched": None,
+                },
+            }
+        )
+
+        self.assertEqual(app.get_search_results("Unpriced Card"), [])
+
+        response = app.app.test_client().get("/search?q=Unpriced+Card")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"No cards matched that search.", response.data)
+        self.assertNotIn(b"cardModal-0", response.data)
+        self.assertNotIn(b"search-card-tile", response.data)
+        self.assertNotIn(b"$0.00", response.data)
+
+    def test_add_to_collection_honors_quantity_and_accumulates(self):
+        conn = sqlite3.connect(app.app.config["DATABASE"])
+        conn.execute(
+            "INSERT INTO cards (id, name, set_code, set_name, collector_number, foil, price_usd) VALUES (1, 'Sol Ring', 'cmm', 'Commander Masters', '1', 0, 2.0)"
+        )
+        conn.commit()
+        conn.close()
+
+        client = app.app.test_client()
+        response = client.get("/search?q=Sol+Ring")
+        self.assertIn(b'id="add-quantity"', response.data)
+
+        client.post("/add-to-collection", data={"card_id": 1, "quantity": 8})
+        client.post("/add-to-collection", data={"card_id": 1, "quantity": 0})
+        client.post("/add-to-collection", data={"card_id": 1, "quantity": -5})
+
+        conn = sqlite3.connect(app.app.config["DATABASE"])
+        quantity = conn.execute("SELECT quantity FROM collection WHERE card_id = 1").fetchone()[0]
+        conn.close()
+        self.assertEqual(quantity, 10)
+
+
 if __name__ == "__main__":
     unittest.main()

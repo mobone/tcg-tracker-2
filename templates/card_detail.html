@@ -5,7 +5,7 @@
     <div class="panel-header d-flex justify-content-between align-items-center flex-wrap gap-3">
       <div>
         <h1 class="mb-1">{{ card.name }}</h1>
-        <p class="text-secondary mb-0">{{ card.set_name or (card.set_code|upper) }} · Collector # {{ card.collector_number }} · {{ 'Foil' if card.foil else 'Non-foil' }}</p>
+        <p class="text-secondary mb-0">{{ card.set_name or (card.set_code|upper) }} · Collector # {{ card.collector_number }} · {{ card.finish|replace('_', ' ')|title }}</p>
       </div>
       <a class="btn btn-outline-light" href="{{ url_for('index') }}">Back to collection</a>
     </div>

@@ -18,13 +18,18 @@
         {% if search_results %}
           <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
             <div class="small text-secondary">Showing {{ search_results|length }} matching cards.</div>
-            <div class="btn-group btn-group-sm" role="group" aria-label="Result view">
-              <button type="button" class="btn btn-outline-light active" data-view-toggle="list">List</button>
-              <button type="button" class="btn btn-outline-light" data-view-toggle="cards">Cards</button>
+            <div class="d-flex align-items-center gap-3 flex-wrap">
+              <label class="d-flex align-items-center gap-2 small text-secondary mb-0">
+                Quantity to add
+                <input type="number" id="add-quantity" class="form-control form-control-sm" style="width: 5rem;" min="1" max="999" step="1" value="1" />
+              </label>
+              <div class="btn-group btn-group-sm" role="group" aria-label="Result view">
+                <button type="button" class="btn btn-outline-light active" data-view-toggle="list">List</button>
+                <button type="button" class="btn btn-outline-light" data-view-toggle="cards">Cards</button>
+              </div>
             </div>
           </div>
           {% for card in search_results %}
-            {% set first_variant = card.variants.foil if card.variants.foil is defined else card.variants.nonfoil %}
             <div class="list-group-item bg-transparent d-flex justify-content-between align-items-center flex-wrap gap-3 search-list-row">
               <div class="card-hover-wrap">
                 <button
@@ -43,22 +48,16 @@
                 </div>
               </div>
               <div class="d-flex align-items-center gap-2 flex-wrap">
-                {% if card.variants.foil is defined %}
-                  <form method="POST" action="{{ url_for('add_to_collection') }}">
-                    <input type="hidden" name="card_id" value="{{ card.variants.foil.id }}" />
-                    <input type="hidden" name="quantity" value="1" />
-                    <input type="hidden" name="search_q" value="{{ query or '' }}" />
-                    <button class="btn btn-sm btn-primary" type="submit">Add foil ${{ '%.2f' | format(card.variants.foil.price_usd or 0) }}</button>
-                  </form>
-                {% endif %}
-                {% if card.variants.nonfoil is defined %}
-                  <form method="POST" action="{{ url_for('add_to_collection') }}">
-                    <input type="hidden" name="card_id" value="{{ card.variants.nonfoil.id }}" />
-                    <input type="hidden" name="quantity" value="1" />
-                    <input type="hidden" name="search_q" value="{{ query or '' }}" />
-                    <button class="btn btn-sm btn-primary" type="submit">{{ 'Add' if card.is_sealed else 'Add nonfoil' }} ${{ '%.2f' | format(card.variants.nonfoil.price_usd or 0) }}</button>
-                  </form>
-                {% endif %}
+                {% for finish, variant in card.variants.items() %}
+                  {% if variant.price_usd is not none %}
+                    <form method="POST" action="{{ url_for('add_to_collection') }}">
+                      <input type="hidden" name="card_id" value="{{ variant.id }}" />
+                      <input type="hidden" name="quantity" value="1" />
+                      <input type="hidden" name="search_q" value="{{ query or '' }}" />
+                      <button class="btn btn-sm btn-primary" type="submit">{{ 'Add' if card.is_sealed and finish == 'nonfoil' else 'Add ' ~ ('Etched Foil' if finish == 'etched' else finish|replace('_', ' ')|title) }} ${{ '%.2f' | format(variant.price_usd) }}</button>
+                    </form>
+                  {% endif %}
+                {% endfor %}
               </div>
             </div>
 
@@ -83,34 +82,22 @@
                       <div class="col-md-7">
                         <div class="mb-2 text-secondary">{{ card.set_name or (card.set_code|upper) }} · #{{ card.collector_number }}</div>
                         <ul class="list-group list-group-flush">
-                          {% if card.variants.foil is defined %}
-                            <li class="list-group-item bg-transparent text-light border-secondary">Foil price: ${{ '%.2f' | format(card.variants.foil.price_usd or 0) }}</li>
-                          {% endif %}
-                          {% if card.variants.nonfoil is defined %}
-                            <li class="list-group-item bg-transparent text-light border-secondary">{{ 'Price' if card.is_sealed else 'Non-foil price' }}: ${{ '%.2f' | format(card.variants.nonfoil.price_usd or 0) }}</li>
-                          {% endif %}
+                          {% for finish, variant in card.variants.items() %}
+                            <li class="list-group-item bg-transparent text-light border-secondary">{{ finish|replace('_', ' ')|title }} price: {% if variant.price_usd is not none %}${{ '%.2f' | format(variant.price_usd) }}{% else %}Unavailable{% endif %}</li>
+                          {% endfor %}
                         </ul>
                         <div class="d-flex gap-2 mt-3 flex-wrap">
-                          {% if card.variants.foil is defined %}
-                            <form method="POST" action="{{ url_for('add_to_collection') }}">
-                              <input type="hidden" name="card_id" value="{{ card.variants.foil.id }}" />
-                              <input type="hidden" name="quantity" value="1" />
-                              <input type="hidden" name="search_q" value="{{ query or '' }}" />
-                              <button class="btn btn-primary" type="submit">Add foil</button>
-                            </form>
-                          {% endif %}
-                          {% if card.variants.nonfoil is defined %}
-                            <form method="POST" action="{{ url_for('add_to_collection') }}">
-                              <input type="hidden" name="card_id" value="{{ card.variants.nonfoil.id }}" />
-                              <input type="hidden" name="quantity" value="1" />
-                              <input type="hidden" name="search_q" value="{{ query or '' }}" />
-                              <button class="btn btn-primary" type="submit">{{ 'Add' if card.is_sealed else 'Add nonfoil' }}</button>
-                            </form>
-                          {% endif %}
-                          {% if card.variants.foil is defined or card.variants.nonfoil is defined %}
-                            {% set first_variant = card.variants.foil if card.variants.foil is defined else card.variants.nonfoil %}
-                            <a class="btn btn-outline-light" href="{{ url_for('card_detail', card_id=first_variant.id) }}">View full history</a>
-                          {% endif %}
+                          {% for finish, variant in card.variants.items() %}
+                            {% if variant.price_usd is not none %}
+                              <form method="POST" action="{{ url_for('add_to_collection') }}">
+                                <input type="hidden" name="card_id" value="{{ variant.id }}" />
+                                <input type="hidden" name="quantity" value="1" />
+                                <input type="hidden" name="search_q" value="{{ query or '' }}" />
+                                <button class="btn btn-primary" type="submit">{{ 'Add' if card.is_sealed and finish == 'nonfoil' else 'Add ' ~ ('Etched Foil' if finish == 'etched' else finish|replace('_', ' ')|title) }}</button>
+                              </form>
+                            {% endif %}
+                          {% endfor %}
+                          <a class="btn btn-outline-light" href="{{ url_for('card_detail', card_id=card.first_variant_id) }}">View full history</a>
                         </div>
                       </div>
                     </div>
@@ -132,13 +119,13 @@
                 <div class="fw-semibold mt-2">{{ card.name }}</div>
                 <div class="small text-secondary mb-2">{{ card.set_name or (card.set_code|upper) }} · {{ card.collector_number }}</div>
                 <div class="d-flex gap-2 flex-wrap justify-content-center">
-                  {% for key, label in [('foil', 'foil'), ('nonfoil', 'nonfoil')] %}
-                    {% if card.variants[key] is defined %}
+                  {% for finish, variant in card.variants.items() %}
+                    {% if variant.price_usd is not none %}
                       <form method="POST" action="{{ url_for('add_to_collection') }}">
-                        <input type="hidden" name="card_id" value="{{ card.variants[key].id }}" />
+                        <input type="hidden" name="card_id" value="{{ variant.id }}" />
                         <input type="hidden" name="quantity" value="1" />
                         <input type="hidden" name="search_q" value="{{ query or '' }}" />
-                        <button class="btn btn-sm btn-primary" type="submit">{{ 'Add' if (card.is_sealed and key == 'nonfoil') else 'Add ' ~ label }} ${{ '%.2f' | format(card.variants[key].price_usd or 0) }}</button>
+                        <button class="btn btn-sm btn-primary" type="submit">{{ 'Add' if card.is_sealed and finish == 'nonfoil' else 'Add ' ~ ('Etched Foil' if finish == 'etched' else finish|replace('_', ' ')|title) }} ${{ '%.2f' | format(variant.price_usd) }}</button>
                       </form>
                     {% endif %}
                   {% endfor %}
@@ -169,6 +156,24 @@
         let saved = null;
         try { saved = localStorage.getItem('searchView'); } catch (e) {}
         if (saved === 'cards' || saved === 'list') setView(saved);
+
+        const quantityInput = document.getElementById('add-quantity');
+        if (quantityInput) {
+          const readQuantity = () => Math.min(999, Math.max(1, parseInt(quantityInput.value, 10) || 1));
+          try {
+            const savedQuantity = parseInt(localStorage.getItem('addQuantity'), 10);
+            if (savedQuantity > 0) quantityInput.value = Math.min(999, savedQuantity);
+          } catch (e) {}
+          quantityInput.addEventListener('change', () => {
+            quantityInput.value = readQuantity();
+            try { localStorage.setItem('addQuantity', quantityInput.value); } catch (e) {}
+          });
+          results.addEventListener('submit', (event) => {
+            const field = event.target.querySelector('input[name="quantity"]');
+            if (field) field.value = readQuantity();
+            try { localStorage.setItem('addQuantity', '1'); } catch (e) {}
+          });
+        }
       }
 
       document.querySelectorAll('.card-hover-wrap').forEach((wrap) => {
