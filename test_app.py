@@ -1,3 +1,5 @@
+import gzip
+import json
 import os
 import sqlite3
 import tempfile
@@ -535,6 +537,121 @@ class PruneTests(unittest.TestCase):
         conn = sqlite3.connect(self.temp_db)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM cards").fetchone()[0], 1)
         conn.close()
+
+
+class ScryfallImportDedupTests(unittest.TestCase):
+    """The same Scryfall data must only ever be stored once."""
+
+    def setUp(self):
+        self.original_db = app.app.config["DATABASE"]
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        app.app.config["DATABASE"] = self.temp_db
+        app.init_db()
+        self.original_fetch_url = app.fetch_latest_default_cards_url
+        self.original_get = app.requests.get
+        self.downloads = []
+
+    def tearDown(self):
+        app.fetch_latest_default_cards_url = self.original_fetch_url
+        app.requests.get = self.original_get
+        app.app.config["DATABASE"] = self.original_db
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.temp_db + suffix):
+                os.remove(self.temp_db + suffix)
+
+    def serve(self, stamp, price):
+        url = f"https://data.scryfall.io/default-cards/default-cards-{stamp}.jsonl.gz"
+        record = {"id": "x", "name": "Sol Ring", "set": "cmm", "set_name": "Commander Masters",
+                  "collector_number": "1", "finishes": ["nonfoil"], "prices": {"usd": str(price)}}
+        payload = gzip.compress(json.dumps(record).encode() + b"\n")
+        downloads = self.downloads
+
+        class Response:
+            status_code = 200
+            content = payload
+
+            def raise_for_status(self):
+                pass
+
+        def fake_get(requested_url, timeout=None):
+            downloads.append(requested_url)
+            return Response()
+
+        app.fetch_latest_default_cards_url = lambda: url
+        app.requests.get = fake_get
+        return url
+
+    def query(self, sql):
+        conn = sqlite3.connect(self.temp_db)
+        rows = conn.execute(sql).fetchall()
+        conn.close()
+        return rows
+
+    def test_same_file_pulled_three_times_is_stored_once(self):
+        self.serve("20261124100625", 2.0)
+        results = [app.refresh_default_cards_catalog() for _ in range(3)]
+
+        self.assertEqual(results, [1, 0, 0])
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.query("SELECT recorded_at, price_usd FROM price_history"), [("2026-11-24", 2.0)])
+        self.assertEqual(self.query("SELECT COUNT(*) FROM sync_log"), [(1,)])
+
+    def test_prices_are_recorded_for_the_files_date_not_the_pull_date(self):
+        self.serve("20200105233000", 3.0)
+        app.refresh_default_cards_catalog()
+        self.assertEqual(self.query("SELECT recorded_at FROM price_history"), [("2020-01-05",)])
+
+    def test_newer_file_adds_a_day_and_older_file_is_ignored(self):
+        self.serve("20261123100000", 2.0)
+        app.refresh_default_cards_catalog()
+        self.serve("20261124100000", 2.5)
+        app.refresh_default_cards_catalog()
+        self.serve("20261120100000", 9.0)
+        self.assertEqual(app.refresh_default_cards_catalog(), 0)
+
+        self.assertEqual(
+            self.query("SELECT recorded_at, price_usd FROM price_history ORDER BY recorded_at"),
+            [("2026-11-23", 2.0), ("2026-11-24", 2.5)],
+        )
+        self.assertEqual(self.query("SELECT price_usd FROM cards"), [(2.5,)])
+
+    def test_failed_lookup_does_not_import_stale_data(self):
+        def failing_lookup():
+            raise RuntimeError("Could not determine the latest Scryfall default-cards file")
+
+        app.fetch_latest_default_cards_url = failing_lookup
+        with self.assertRaises(RuntimeError):
+            app.refresh_default_cards_catalog()
+        self.assertEqual(self.query("SELECT COUNT(*) FROM price_history"), [(0,)])
+
+    def test_existing_duplicate_days_are_removed(self):
+        conn = sqlite3.connect(self.temp_db)
+        prices = {
+            "2026-10-01": {i: float(i) for i in range(1, 31)},
+            "2026-10-02": {i: float(i) for i in range(1, 31)},            # re-import of 10-01
+            "2026-10-03": {i: float(i) + (i % 2) for i in range(1, 31)},  # real price movement
+            "2026-10-04": {i: float(i) + (i % 2) for i in range(1, 31)},  # re-import of 10-03
+        }
+        prices["2026-10-02"][99] = 5.0  # card only seen on the duplicate day: must survive
+        for day, by_card in prices.items():
+            for card_id, price in by_card.items():
+                conn.execute(
+                    "INSERT INTO price_history (card_id, recorded_at, foil, price_usd) VALUES (?, ?, 0, ?)",
+                    (card_id, day, price),
+                )
+        conn.commit()
+
+        removed_days, removed_rows = app.remove_duplicate_price_days(conn)
+        conn.commit()
+        remaining = conn.execute(
+            "SELECT recorded_at, COUNT(*) FROM price_history GROUP BY recorded_at ORDER BY recorded_at"
+        ).fetchall()
+        conn.close()
+
+        self.assertEqual(removed_days, ["2026-10-02", "2026-10-04"])
+        self.assertEqual(removed_rows, 60)
+        self.assertEqual(remaining, [("2026-10-01", 30), ("2026-10-02", 1), ("2026-10-03", 30)])
 
 
 if __name__ == "__main__":

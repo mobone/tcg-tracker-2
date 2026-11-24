@@ -16,9 +16,7 @@ from flask import Flask, flash, make_response, redirect, render_template, reques
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("MTG_TRACKER_DB") or BASE_DIR / "data" / "mtg_tracker.db")
-SCRYFALL_DEFAULT_CARDS_URL = (
-    "https://data.scryfall.io/default-cards/default-cards-20261002210553.jsonl.gz"
-)
+SCRYFALL_FILE_TIMESTAMP_RE = re.compile(r"default-cards-(\d{14})\.jsonl\.gz")
 
 _env_file = BASE_DIR / ".env"
 if _env_file.exists():
@@ -211,6 +209,10 @@ def init_db():
         )
         """
     )
+    sync_log_columns = [row[1] for row in conn.execute("PRAGMA table_info(sync_log)").fetchall()]
+    for column_name in ("source_url", "data_generated_at"):
+        if column_name not in sync_log_columns:
+            conn.execute(f"ALTER TABLE sync_log ADD COLUMN {column_name} TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_cards_name ON cards(name COLLATE NOCASE)"
     )
@@ -236,8 +238,59 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_lots_collection ON collection_lots(collection_id)"
     )
     ensure_collection_lots(conn)
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+        remove_duplicate_price_days(conn)
+        conn.execute("PRAGMA user_version = 1")
     conn.commit()
     conn.close()
+
+
+DUPLICATE_DAY_MIN_MATCHES = 20
+
+
+def remove_duplicate_price_days(conn):
+    """One-time cleanup: drop price_history days that are a re-import of the previous day's data.
+
+    Before price rows were keyed by the Scryfall file's own date, pulling the same file on two
+    days stored it twice. A day counts as a duplicate only if every price it shares with the
+    previous kept day is identical (and it shares at least DUPLICATE_DAY_MIN_MATCHES of them;
+    real days have thousands of changes). Only the matching rows are deleted, so cards that
+    exist solely on that day keep their row. Charts and percent changes are unaffected because
+    they carry the last known price forward.
+    """
+    days = [row[0] for row in conn.execute("SELECT DISTINCT recorded_at FROM price_history ORDER BY recorded_at")]
+    removed_days, removed_rows = [], 0
+    previous = days[0] if days else None
+    for day in days[1:]:
+        shared, differing = conn.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(d.price_usd IS NOT p.price_usd), 0)
+            FROM price_history d
+            JOIN price_history p
+              ON p.card_id = d.card_id AND p.foil = d.foil AND p.recorded_at = ?
+            WHERE d.recorded_at = ?
+            """,
+            (previous, day),
+        ).fetchone()
+        if shared >= DUPLICATE_DAY_MIN_MATCHES and differing == 0:
+            removed_rows += conn.execute(
+                """
+                DELETE FROM price_history
+                WHERE recorded_at = ?
+                  AND EXISTS (
+                      SELECT 1 FROM price_history p
+                      WHERE p.card_id = price_history.card_id AND p.foil = price_history.foil
+                        AND p.recorded_at = ? AND p.price_usd IS price_history.price_usd
+                  )
+                """,
+                (day, previous),
+            ).rowcount
+            removed_days.append(day)
+            continue  # same data as `previous`, so keep comparing against it
+        previous = day
+    if removed_days:
+        log(f"Removed {removed_rows} duplicate price rows from re-imported days: {', '.join(removed_days)}")
+    return removed_days, removed_rows
 
 
 def ensure_collection_lots(conn):
@@ -512,9 +565,18 @@ def fetch_latest_default_cards_url():
                     log(f"Using Scryfall default cards URL: {download_url}")
                     return download_url
     except (requests.RequestException, ValueError) as exc:
-        log(f"Bulk-data lookup failed, using fallback URL: {exc!r}")
-    log("WARNING: using hardcoded fallback default cards URL; prices may be stale")
-    return SCRYFALL_DEFAULT_CARDS_URL
+        log(f"Bulk-data lookup failed: {exc!r}")
+    # No stale fallback: importing an old file would record old prices as new data.
+    raise RuntimeError("Could not determine the latest Scryfall default-cards file")
+
+
+def scryfall_file_timestamp(url):
+    """UTC datetime Scryfall generated this bulk file, from its name
+    (default-cards-YYYYMMDDHHMMSS.jsonl.gz), or None if the name has no timestamp."""
+    match = SCRYFALL_FILE_TIMESTAMP_RE.search(url or "")
+    if not match:
+        return None
+    return datetime.strptime(match.group(1), "%Y%m%d%H%M%S")
 
 
 
@@ -565,7 +627,9 @@ def extract_image_url(record):
     return None
 
 
-def upsert_card_record(record, conn=None):
+def upsert_card_record(record, conn=None, recorded_date=None):
+    """Insert/update a card and its price for recorded_date (the Scryfall file's date,
+    defaulting to today), so re-importing the same data never adds a second price row."""
     name = (record.get("name") or "").strip()
     flavor_name = (record.get("flavor_name") or "").strip()
     set_code = (record.get("set") or "").strip()
@@ -648,7 +712,7 @@ def upsert_card_record(record, conn=None):
             """,
             (
                 card_row["id"],
-                utc_now().strftime("%Y-%m-%d"),
+                recorded_date or utc_now().strftime("%Y-%m-%d"),
                 foil_flag,
                 price_value,
             ),
@@ -661,7 +725,28 @@ def upsert_card_record(record, conn=None):
 def refresh_default_cards_catalog():
     log("Starting Scryfall default-cards refresh...")
     url = fetch_latest_default_cards_url()
-    log(f"Downloading catalog from: {url}")
+    generated_at = scryfall_file_timestamp(url)
+
+    conn = get_db_connection()
+    try:
+        latest = conn.execute(
+            "SELECT source_url, data_generated_at FROM sync_log "
+            "WHERE data_generated_at IS NOT NULL ORDER BY data_generated_at DESC LIMIT 1"
+        ).fetchone()
+        already_imported = conn.execute(
+            "SELECT 1 FROM sync_log WHERE source_url = ? LIMIT 1", (url,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if already_imported:
+        log(f"Scryfall file already imported, skipping: {url}")
+        return 0
+    if generated_at and latest and latest["data_generated_at"] >= generated_at.strftime("%Y-%m-%d %H:%M:%S"):
+        log(f"Scryfall file is not newer than the last import ({latest['source_url']}), skipping: {url}")
+        return 0
+
+    recorded_date = (generated_at or utc_now()).strftime("%Y-%m-%d")
+    log(f"Downloading catalog from: {url} (prices recorded for {recorded_date})")
     response = requests.get(url, timeout=90)
     log(f"Download status: {response.status_code}, size={len(response.content)} bytes")
     response.raise_for_status()
@@ -686,10 +771,15 @@ def refresh_default_cards_catalog():
         try:
             conn.execute("BEGIN IMMEDIATE")
             for record in valid_records:
-                upsert_card_record(record, conn=conn)
+                upsert_card_record(record, conn=conn, recorded_date=recorded_date)
             conn.execute(
-                "INSERT INTO sync_log (synced_at, cards_updated) VALUES (?, ?)",
-                (utc_now().strftime("%Y-%m-%d %H:%M:%S"), len(valid_records)),
+                "INSERT INTO sync_log (synced_at, cards_updated, source_url, data_generated_at) VALUES (?, ?, ?, ?)",
+                (
+                    utc_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    len(valid_records),
+                    url,
+                    generated_at.strftime("%Y-%m-%d %H:%M:%S") if generated_at else None,
+                ),
             )
             conn.commit()
             shrink_wal(conn, "Scryfall refresh")
