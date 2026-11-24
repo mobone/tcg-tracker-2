@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from bisect import bisect_right
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -48,8 +49,9 @@ def log(*args):
     print(datetime.now().strftime("[%Y-%m-%d %H:%M:%S]"), *args, flush=True)
 
 
-def get_db_connection():
-    conn = sqlite3.connect(app.config["DATABASE"])
+def get_db_connection(timeout=5.0):
+    # timeout = how long to wait for another connection's lock before "database is locked".
+    conn = sqlite3.connect(app.config["DATABASE"], timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
@@ -672,7 +674,30 @@ def refresh_default_cards_catalog():
     return processed
 
 
-def prune_untracked_data(retention_days=RETENTION_DAYS):
+PRUNE_LOCK_TIMEOUT_SECONDS = 60
+PRUNE_RETRY_SECONDS = 30
+PRUNE_MAX_WAIT_SECONDS = 30 * 60
+
+
+def prune_untracked_data(retention_days=RETENTION_DAYS, max_wait_seconds=PRUNE_MAX_WAIT_SECONDS,
+                         retry_seconds=PRUNE_RETRY_SECONDS):
+    """Run _prune_untracked_data_once, waiting for the database if another process or connection
+    holds a lock (e.g. a long catalog write), for up to max_wait_seconds in total."""
+    deadline = time.monotonic() + max_wait_seconds
+    while True:
+        try:
+            return _prune_untracked_data_once(retention_days)
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "locked" not in message and "busy" not in message:
+                raise
+            if time.monotonic() + retry_seconds > deadline:
+                raise
+            log(f"Database is busy ({exc}); retrying prune in {retry_seconds}s")
+            time.sleep(retry_seconds)
+
+
+def _prune_untracked_data_once(retention_days):
     """Delete data older than retention_days for cards/products that are not in the collection,
     then compact the database file.
 
@@ -684,7 +709,7 @@ def prune_untracked_data(retention_days=RETENTION_DAYS):
     now = datetime.utcnow()
     history_cutoff = (now - timedelta(days=retention_days)).strftime("%Y-%m-%d")
     with DB_MAINTENANCE_LOCK:
-        conn = get_db_connection()
+        conn = get_db_connection(timeout=PRUNE_LOCK_TIMEOUT_SECONDS)
         try:
             # Measure card staleness against the last successful catalog sync rather than the
             # clock, so a sync outage can never make the whole catalog look stale and wipe it.
@@ -1457,4 +1482,8 @@ if os.getenv("MTG_TRACKER_DISABLE_BACKGROUND") != "1":
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     log(f"Launching Flask dev server on port {port}...")
-    app.run(debug=True, host="0.0.0.0", port=port)
+    # Debug mode (interactive debugger) only when FLASK_DEBUG=1. The reloader stays off: it re-runs
+    # this module in a second process, which would start a second copy of the sync, the prune and
+    # the scheduler that then fight over the database lock.
+    debug = os.getenv("FLASK_DEBUG") == "1"
+    app.run(debug=debug, use_reloader=False, host="0.0.0.0", port=port)

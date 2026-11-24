@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -472,6 +473,37 @@ class PruneTests(unittest.TestCase):
         finally:
             app.refresh_default_cards_catalog, app.prune_untracked_data = original_refresh, original_prune
         self.assertEqual(calls, ["refresh", "prune"])
+
+    def test_prune_waits_for_lock_held_by_another_connection(self):
+        # Another connection (like a second process mid catalog write) holds the write lock.
+        blocker = sqlite3.connect(self.temp_db, isolation_level=None, check_same_thread=False)
+        blocker.execute("BEGIN IMMEDIATE")
+        original_timeout = app.PRUNE_LOCK_TIMEOUT_SECONDS
+        app.PRUNE_LOCK_TIMEOUT_SECONDS = 0.05
+        release = threading.Timer(0.3, blocker.rollback)
+        release.start()
+        try:
+            started = time.monotonic()
+            result = app.prune_untracked_data(max_wait_seconds=5, retry_seconds=0.1)
+        finally:
+            release.join()
+            blocker.close()
+            app.PRUNE_LOCK_TIMEOUT_SECONDS = original_timeout
+        self.assertEqual(result, (0, 0))
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+    def test_prune_gives_up_after_max_wait(self):
+        blocker = sqlite3.connect(self.temp_db, isolation_level=None)
+        blocker.execute("BEGIN IMMEDIATE")
+        original_timeout = app.PRUNE_LOCK_TIMEOUT_SECONDS
+        app.PRUNE_LOCK_TIMEOUT_SECONDS = 0.05
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                app.prune_untracked_data(max_wait_seconds=0.3, retry_seconds=0.1)
+        finally:
+            blocker.rollback()
+            blocker.close()
+            app.PRUNE_LOCK_TIMEOUT_SECONDS = original_timeout
 
     def test_prune_never_wipes_catalog_when_sync_is_stale(self):
         stale = (datetime.utcnow() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
