@@ -267,6 +267,9 @@
                           <div class="mb-2 text-secondary">{{ row.set_name or (row.set_code|upper) }} · #{{ row.collector_number }} · {{ row.finish|replace('_', ' ')|title }}</div>
                           <ul class="list-group list-group-flush">
                             <li class="list-group-item bg-transparent text-light border-secondary">Current price: ${{ '%.2f' | format(row.price_usd or 0) }}</li>
+                            {% if row.start_price is not none %}
+                              <li class="list-group-item bg-transparent text-light border-secondary">Start price: ${{ '%.2f' | format(row.start_price) }}{% if row.acquired_date %} (added {{ row.acquired_date }}){% endif %}</li>
+                            {% endif %}
                             <li class="list-group-item bg-transparent text-light border-secondary">Percent change: {{ '%+.2f' | format(row.percent_change or 0) }}%</li>
                             <li class="list-group-item bg-transparent text-light border-secondary">Quantity: {{ row.quantity }}</li>
                           </ul>

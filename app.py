@@ -5,7 +5,8 @@ import os
 import re
 import sqlite3
 import threading
-from datetime import datetime
+from bisect import bisect_right
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -13,7 +14,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, flash, make_response, redirect, render_template, request, url_for
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "data" / "mtg_tracker.db"
+DB_PATH = Path(os.getenv("MTG_TRACKER_DB") or BASE_DIR / "data" / "mtg_tracker.db")
 SCRYFALL_DEFAULT_CARDS_URL = (
     "https://data.scryfall.io/default-cards/default-cards-20261002210553.jsonl.gz"
 )
@@ -30,6 +31,9 @@ app.config["SECRET_KEY"] = "dev-secret-key-change-me"
 app.config["DATABASE"] = str(DB_PATH)
 app.config["CATALOG_SYNCED"] = False
 SYNC_LOCK = threading.Lock()
+# Serializes the big write jobs (catalog refresh, pruning/VACUUM) so they never fight for the DB lock.
+DB_MAINTENANCE_LOCK = threading.Lock()
+RETENTION_DAYS = 30
 SYNC_THREAD = None
 SCHEDULER = None
 
@@ -188,8 +192,129 @@ def init_db():
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_history_card_date ON price_history(card_id, recorded_at)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS collection_lots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collection_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            start_price REAL,
+            acquired_at TEXT NOT NULL,
+            FOREIGN KEY(collection_id) REFERENCES collection(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_lots_collection ON collection_lots(collection_id)"
+    )
+    ensure_collection_lots(conn)
     conn.commit()
     conn.close()
+
+
+def ensure_collection_lots(conn):
+    """Give every collection row without purchase lots a single lot.
+
+    The lot's start price is the card's recorded price on the day it was acquired (or the
+    closest price after that), so existing rows get a fixed baseline instead of whatever the
+    oldest catalog price happens to be.
+    """
+    conn.execute(
+        "DELETE FROM collection_lots WHERE collection_id NOT IN (SELECT id FROM collection)"
+    )
+    conn.execute(
+        """
+        INSERT INTO collection_lots (collection_id, quantity, start_price, acquired_at)
+        SELECT
+            c.id,
+            COALESCE(c.quantity, 1),
+            COALESCE(
+                (SELECT h.price_usd FROM price_history h
+                 WHERE h.card_id = c.card_id AND h.price_usd IS NOT NULL
+                   AND h.recorded_at <= substr(COALESCE(c.acquired_at, CURRENT_TIMESTAMP), 1, 10)
+                 ORDER BY h.recorded_at DESC LIMIT 1),
+                (SELECT h.price_usd FROM price_history h
+                 WHERE h.card_id = c.card_id AND h.price_usd IS NOT NULL
+                 ORDER BY h.recorded_at ASC LIMIT 1),
+                (SELECT cards.price_usd FROM cards WHERE cards.id = c.card_id)
+            ),
+            COALESCE(c.acquired_at, CURRENT_TIMESTAMP)
+        FROM collection c
+        WHERE NOT EXISTS (SELECT 1 FROM collection_lots l WHERE l.collection_id = c.id)
+        """
+    )
+
+
+def normalize_history_date(value):
+    parsed = parse_history_date(value)
+    return parsed.isoformat() if parsed else None
+
+
+def load_owned_price_data(conn):
+    """Return (lots, history_by_card) for cards in the collection.
+
+    history_by_card maps card_id -> (sorted dates, prices) for price_as_of lookups.
+    """
+    ensure_collection_lots(conn)
+    lots = []
+    for row in conn.execute(
+        """
+        SELECT l.collection_id, c.card_id, l.quantity, l.start_price, l.acquired_at
+        FROM collection_lots l
+        JOIN collection c ON c.id = l.collection_id
+        ORDER BY l.acquired_at ASC, l.id ASC
+        """
+    ).fetchall():
+        lots.append(
+            {
+                "collection_id": row["collection_id"],
+                "card_id": row["card_id"],
+                "quantity": row["quantity"] or 0,
+                "start_price": row["start_price"],
+                "acquired_date": normalize_history_date(row["acquired_at"]),
+            }
+        )
+
+    history_by_card = {}
+    for row in conn.execute(
+        """
+        SELECT card_id, recorded_at, price_usd
+        FROM price_history
+        WHERE price_usd IS NOT NULL
+          AND card_id IN (SELECT card_id FROM collection)
+        ORDER BY card_id, recorded_at
+        """
+    ).fetchall():
+        date = normalize_history_date(row["recorded_at"])
+        if date is None:
+            continue
+        dates, prices = history_by_card.setdefault(row["card_id"], ([], []))
+        dates.append(date)
+        prices.append(float(row["price_usd"]))
+    return lots, history_by_card
+
+
+def price_as_of(history_by_card, card_id, date):
+    """Most recent recorded price on or before date, or None."""
+    dates, prices = history_by_card.get(card_id, ([], []))
+    index = bisect_right(dates, date)
+    return prices[index - 1] if index else None
+
+
+def first_price_on_or_after(history_by_card, card_id, date):
+    dates, prices = history_by_card.get(card_id, ([], []))
+    index = bisect_right(dates, date)
+    if index and dates[index - 1] == date:
+        return prices[index - 1]
+    return prices[index] if index < len(prices) else None
+
+
+def lot_start_price(lot, history_by_card):
+    if lot["start_price"] is not None:
+        return float(lot["start_price"])
+    if lot["acquired_date"]:
+        return first_price_on_or_after(history_by_card, lot["card_id"], lot["acquired_date"])
+    return None
 
 
 def migrate_product_matches_to_cards():
@@ -528,167 +653,90 @@ def refresh_default_cards_catalog():
         if record.get("name") and record.get("set") and record.get("collector_number"):
             valid_records.append(record)
 
-    conn = get_db_connection()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        for record in valid_records:
-            upsert_card_record(record, conn=conn)
-        conn.execute(
-            "INSERT INTO sync_log (synced_at, cards_updated) VALUES (?, ?)",
-            (datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), len(valid_records)),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    with DB_MAINTENANCE_LOCK:
+        conn = get_db_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for record in valid_records:
+                upsert_card_record(record, conn=conn)
+            conn.execute(
+                "INSERT INTO sync_log (synced_at, cards_updated) VALUES (?, ?)",
+                (datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), len(valid_records)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     processed = len(valid_records)
     log(f"Scryfall refresh complete: {processed} records processed.")
     return processed
 
 
-TCGPLAYER_API = "https://api.tcgplayer.com"
-TCGPLAYER_MIN_SYNC_SECONDS = 12 * 3600
+def prune_untracked_data(retention_days=RETENTION_DAYS):
+    """Delete data older than retention_days for cards/products that are not in the collection,
+    then compact the database file.
+
+    - price_history rows older than the cutoff are removed for untracked cards.
+    - cards rows the catalog sync has not refreshed in retention_days (no longer in Scryfall's
+      data, or sealed products whose prices stopped updating) are removed if untracked.
+    Cards in the collection keep their full history.
+    """
+    now = datetime.utcnow()
+    history_cutoff = (now - timedelta(days=retention_days)).strftime("%Y-%m-%d")
+    with DB_MAINTENANCE_LOCK:
+        conn = get_db_connection()
+        try:
+            # Measure card staleness against the last successful catalog sync rather than the
+            # clock, so a sync outage can never make the whole catalog look stale and wipe it.
+            last_sync = conn.execute("SELECT MAX(synced_at) FROM sync_log").fetchone()[0]
+            reference = datetime.strptime(last_sync, "%Y-%m-%d %H:%M:%S") if last_sync else None
+            stale_cards_sql = (
+                "SELECT id FROM cards WHERE last_updated < ? "
+                "AND id NOT IN (SELECT card_id FROM collection)"
+            )
+
+            conn.execute("BEGIN IMMEDIATE")
+            history_deleted = conn.execute(
+                "DELETE FROM price_history WHERE recorded_at < ? "
+                "AND card_id NOT IN (SELECT card_id FROM collection)",
+                (history_cutoff,),
+            ).rowcount
+            cards_deleted = 0
+            if reference is not None:
+                card_cutoff = (reference - timedelta(days=retention_days)).strftime("%Y-%m-%d %H:%M:%S")
+                history_deleted += conn.execute(
+                    f"DELETE FROM price_history WHERE card_id IN ({stale_cards_sql})",
+                    (card_cutoff,),
+                ).rowcount
+                cards_deleted = conn.execute(
+                    f"DELETE FROM cards WHERE id IN ({stale_cards_sql})",
+                    (card_cutoff,),
+                ).rowcount
+            conn.commit()
+            log(f"Pruned {history_deleted} price history rows and {cards_deleted} untracked cards older than {retention_days} days")
+
+            log("Compacting database (VACUUM)...")
+            conn.execute("VACUUM")
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            log("Database compaction complete")
+        finally:
+            conn.close()
+    return history_deleted, cards_deleted
 
 
-def get_tcgplayer_token():
-    public_key = os.getenv("TCGPLAYER_PUBLIC_KEY")
-    private_key = os.getenv("TCGPLAYER_PRIVATE_KEY")
-    if not public_key or not private_key:
-        return None
-    response = requests.post(
-        f"{TCGPLAYER_API}/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": public_key,
-            "client_secret": private_key,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()["access_token"]
-
-
-def scheduled_tcgplayer_sync():
+def scheduled_prune():
     try:
-        # Slack so a run exactly 12h after the previous one isn't skipped by a few minutes
-        refresh_tcgplayer_sealed_products(min_age_seconds=TCGPLAYER_MIN_SYNC_SECONDS - 1800)
+        prune_untracked_data()
     except Exception as exc:
-        log(f"Scheduled TCGplayer sealed sync FAILED: {exc!r}")
-
-
-def refresh_tcgplayer_sealed_products(min_age_seconds=TCGPLAYER_MIN_SYNC_SECONDS):
-    """Fetch MTG sealed products from TCGplayer and store them alongside cards."""
-    conn = get_db_connection()
-    last_row = conn.execute(
-        "SELECT MAX(last_updated) AS last_updated FROM cards WHERE is_sealed = 1"
-    ).fetchone()
-    conn.close()
-    if last_row["last_updated"]:
-        last_updated = datetime.strptime(last_row["last_updated"], "%Y-%m-%d %H:%M:%S")
-        if (datetime.utcnow() - last_updated).total_seconds() < min_age_seconds:
-            log("TCGplayer sealed data is less than 12 hours old; skipping sync")
-            return 0
-
-    token = get_tcgplayer_token()
-    if not token:
-        log("TCGplayer keys not configured; skipping sealed product sync")
-        return 0
-    headers = {"Authorization": f"bearer {token}"}
-
-    def get_json(path, params=None):
-        resp = requests.get(f"{TCGPLAYER_API}{path}", headers=headers, params=params, timeout=60)
-        resp.raise_for_status()
-        return resp.json()
-
-    groups = {}
-    offset = 0
-    while True:
-        data = get_json("/catalog/categories/1/groups", {"limit": 100, "offset": offset})
-        results = data.get("results") or []
-        for group in results:
-            groups[group["groupId"]] = group
-        offset += len(results)
-        if not results or offset >= data.get("totalItems", 0):
-            break
-
-    products = []
-    offset = 0
-    while True:
-        data = get_json(
-            "/catalog/products",
-            {"categoryId": 1, "productTypes": "Sealed Products", "limit": 100, "offset": offset},
-        )
-        results = data.get("results") or []
-        products.extend(results)
-        offset += len(results)
-        if not results or offset >= data.get("totalItems", 0):
-            break
-    log(f"TCGplayer returned {len(products)} sealed products")
-
-    prices = {}
-    for start in range(0, len(products), 250):
-        ids = ",".join(str(p["productId"]) for p in products[start:start + 250])
-        data = get_json(f"/pricing/product/{ids}")
-        for entry in data.get("results") or []:
-            if entry.get("subTypeName") != "Normal":
-                continue
-            price = entry.get("marketPrice")
-            if price is None:
-                price = entry.get("midPrice")
-            prices[entry["productId"]] = price
-
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    conn = get_db_connection()
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        for product in products:
-            product_id = product["productId"]
-            group = groups.get(product.get("groupId")) or {}
-            set_code = (group.get("abbreviation") or "sealed").lower()
-            set_name = group.get("name") or "Sealed Product"
-            image_url = (product.get("imageUrl") or "").replace("_200w", "_400w") or None
-            price = prices.get(product_id)
-            collector_number = f"tcg-{product_id}"
-            conn.execute(
-                """
-                INSERT INTO cards (name, set_code, set_name, collector_number, foil, price_usd,
-                                   image_url, last_updated, is_sealed, tcgplayer_product_id)
-                VALUES (?, ?, ?, ?, 0, ?, ?, ?, 1, ?)
-                ON CONFLICT(name, set_code, collector_number, foil)
-                DO UPDATE SET set_name = excluded.set_name,
-                              price_usd = excluded.price_usd,
-                              image_url = excluded.image_url,
-                              last_updated = excluded.last_updated,
-                              is_sealed = 1,
-                              tcgplayer_product_id = excluded.tcgplayer_product_id
-                """,
-                (product["name"], set_code, set_name, collector_number, price, image_url, now, product_id),
-            )
-            if price is None:
-                continue
-            card_row = conn.execute(
-                "SELECT id FROM cards WHERE name = ? AND set_code = ? AND collector_number = ? AND foil = 0",
-                (product["name"], set_code, collector_number),
-            ).fetchone()
-            conn.execute(
-                """
-                INSERT INTO price_history (card_id, recorded_at, foil, price_usd)
-                VALUES (?, ?, 0, ?)
-                ON CONFLICT(card_id, recorded_at, foil)
-                DO UPDATE SET price_usd = excluded.price_usd
-                """,
-                (card_row["id"], today, price),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-    log(f"TCGplayer sealed sync complete: {len(products)} products")
-    return len(products)
+        log(f"Scheduled prune FAILED: {exc!r}")
 
 
 def import_sealed_products_into_collection():
-    """Add sealed products from tcg_collection.db whose TCGplayer id matches a synced sealed product."""
+    """Add sealed products from tcg_collection.db whose TCGplayer id matches a previously synced sealed product.
+
+    Sealed prices are no longer refreshed (TCGplayer API access was revoked), so this only
+    links against sealed rows already present in the cards table.
+    """
     product_db_path = BASE_DIR / "tcg_collection.db"
     if not product_db_path.exists():
         return 0
@@ -785,17 +833,19 @@ def schedule_daily_scryfall_sync():
         id="daily_scryfall_sync",
         replace_existing=True,
     )
+    # Runs after the 05:00 catalog sync; DB_MAINTENANCE_LOCK makes it wait if the sync overruns.
     scheduler.add_job(
-        scheduled_tcgplayer_sync,
-        "interval",
-        hours=12,
-        id="tcgplayer_sealed_sync",
+        scheduled_prune,
+        "cron",
+        hour=6,
+        minute=0,
+        id="daily_prune",
         replace_existing=True,
     )
     scheduler.start()
     job = scheduler.get_job("daily_scryfall_sync")
     log(f"Daily Scryfall sync scheduler started; next run at {job.next_run_time}")
-    log(f"TCGplayer sealed sync scheduled every 12 hours; next run at {scheduler.get_job('tcgplayer_sealed_sync').next_run_time}")
+    log(f"Daily prune of untracked data older than {RETENTION_DAYS} days; next run at {scheduler.get_job('daily_prune').next_run_time}")
     SCHEDULER = scheduler
     return scheduler
 
@@ -812,10 +862,6 @@ def start_background_sync():
             log("Background sync started")
             try:
                 refresh_default_cards_catalog()
-                try:
-                    refresh_tcgplayer_sealed_products()
-                except Exception as exc:
-                    log(f"TCGplayer sealed sync FAILED: {exc!r}")
             finally:
                 with SYNC_LOCK:
                     SYNC_THREAD = None
@@ -848,25 +894,32 @@ def get_collection_rows():
         ORDER BY cards.name ASC, cards.set_code ASC, cards.collector_number ASC
         """
     ).fetchall()
-    history_rows = conn.execute(
-        "SELECT card_id, recorded_at, price_usd FROM price_history ORDER BY recorded_at ASC, card_id ASC"
-    ).fetchall()
+    lots, history_by_card = load_owned_price_data(conn)
+    conn.commit()
     conn.close()
 
-    history_by_card = {}
-    for row in history_rows:
-        history_by_card.setdefault(row["card_id"], []).append(float(row["price_usd"] or 0))
+    # Quantity-weighted start price across every time this card was added.
+    cost_by_collection = {}
+    for lot in lots:
+        start_price = lot_start_price(lot, history_by_card)
+        if start_price is None:
+            continue
+        totals = cost_by_collection.setdefault(lot["collection_id"], [0, 0.0, lot["acquired_date"]])
+        totals[0] += lot["quantity"]
+        totals[1] += lot["quantity"] * start_price
 
     enriched_rows = []
     for row in rows:
-        prices = history_by_card.get(row["card_id"], [])
-        if len(prices) >= 2:
-            start_price = prices[0]
-            latest_price = prices[-1]
-            percent_change = ((latest_price - start_price) / start_price * 100) if start_price else 0.0
+        row_dict = dict(row)
+        quantity, cost, acquired_date = cost_by_collection.get(row["collection_id"], (0, 0.0, None))
+        start_price = (cost / quantity) if quantity else None
+        current_price = row["price_usd"]
+        if start_price and current_price is not None:
+            percent_change = (current_price - start_price) / start_price * 100
         else:
             percent_change = 0.0
-        row_dict = dict(row)
+        row_dict["start_price"] = round(start_price, 2) if start_price is not None else None
+        row_dict["acquired_date"] = acquired_date
         row_dict["percent_change"] = round(percent_change, 2)
         enriched_rows.append(row_dict)
 
@@ -1018,25 +1071,19 @@ def get_analytics_data(period="all"):
         """
     ).fetchall()
 
-    history_rows = conn.execute(
-        "SELECT card_id, recorded_at, price_usd FROM price_history ORDER BY recorded_at ASC, card_id ASC"
-    ).fetchall()
+    lots, history_by_card = load_owned_price_data(conn)
+    conn.commit()
     conn.close()
 
-    history_dates = [parse_history_date(row["recorded_at"]) for row in history_rows]
-    history_dates = [d for d in history_dates if d is not None]
-    latest_history_date = max(history_dates) if history_dates else datetime.utcnow().date()
-    start_boundary = latest_history_date if lookup_months is None else add_months_to_date(latest_history_date, -lookup_months)
+    lot_dates = {lot["acquired_date"] for lot in lots if lot["acquired_date"]}
+    history_dates = {date for dates, _ in history_by_card.values() for date in dates}
+    all_known_dates = history_dates | lot_dates
+    latest_date = max(all_known_dates) if all_known_dates else datetime.utcnow().date().isoformat()
+    if lookup_months is None:
+        boundary = None
+    else:
+        boundary = add_months_to_date(datetime.fromisoformat(latest_date).date(), -lookup_months).isoformat()
 
-    filtered_history_rows = []
-    for row in history_rows:
-        recorded_date = parse_history_date(row["recorded_at"])
-        if recorded_date is None:
-            continue
-        if lookup_months is None or recorded_date >= start_boundary:
-            filtered_history_rows.append(row)
-
-    collection_qty = {row["card_id"]: row["quantity"] or 1 for row in collection_rows}
     current_collection_value = sum((row["quantity"] or 1) * (row["price_usd"] or 0) for row in collection_rows)
 
     set_totals = {}
@@ -1052,50 +1099,46 @@ def get_analytics_data(period="all"):
         finish_totals[finish_label]["quantity"] += row["quantity"] or 1
         finish_totals[finish_label]["total_value"] += (row["quantity"] or 1) * (row["price_usd"] or 0)
 
-    # Like-for-like trend: only cards that already had a price on the first date in the
-    # window, so newly added cards/products don't register as value change.
-    card_prices_by_date = {}
-    for row in filtered_history_rows:
-        if row["card_id"] in collection_qty:
-            card_prices_by_date.setdefault(row["card_id"], {})[row["recorded_at"]] = float(row["price_usd"] or 0)
-
-    first_date = min(
-        (date for prices in card_prices_by_date.values() for date in prices), default=None
+    # Each lot only counts from the day it was acquired, measured against a fixed baseline:
+    # its acquisition price, or (for lots held before the selected window) its price at the
+    # start of the window. Adding a card therefore raises value and baseline equally and
+    # never shows up as gain or loss.
+    first_acquired = min(lot_dates) if lot_dates else None
+    trend_dates = sorted(
+        date
+        for date in all_known_dates
+        if first_acquired and date >= first_acquired and (boundary is None or date >= boundary)
     )
-    cohort = {
-        card_id: prices
-        for card_id, prices in card_prices_by_date.items()
-        if first_date in prices
-    }
-    all_dates = sorted({date for prices in cohort.values() for date in prices})
+    window_start = trend_dates[0] if trend_dates else None
 
-    trend_totals = {}
-    for card_id, prices in cohort.items():
-        last_price = None
-        for date in all_dates:
-            if date in prices:
-                last_price = prices[date]
-            trend_totals[date] = trend_totals.get(date, 0.0) + last_price * collection_qty[card_id]
-
-    ordered_trend = [
-        {"date": date, "total_value": round(float(value), 2)}
-        for date, value in sorted(trend_totals.items())
-    ]
-
-    start_value = ordered_trend[0]["total_value"] if ordered_trend else 0.0
-    collection_trend = []
-    for index, entry in enumerate(ordered_trend):
-        if index == 0:
-            dollar_change = 0.0
-            percent_change = 0.0
+    for lot in lots:
+        start_price = lot_start_price(lot, history_by_card)
+        if window_start and lot["acquired_date"] and lot["acquired_date"] < window_start:
+            baseline = price_as_of(history_by_card, lot["card_id"], window_start)
+            lot["baseline"] = baseline if baseline is not None else start_price
         else:
-            dollar_change = float(entry["total_value"]) - float(start_value)
-            percent_change = ((dollar_change / start_value) * 100) if start_value else 0.0
+            lot["baseline"] = start_price
+    active_lots = [lot for lot in lots if lot["baseline"] is not None and lot["acquired_date"]]
 
+    collection_trend = []
+    for date in trend_dates:
+        total_value = 0.0
+        basis = 0.0
+        for lot in active_lots:
+            if lot["acquired_date"] > date:
+                continue
+            price = price_as_of(history_by_card, lot["card_id"], date)
+            if price is None:
+                price = lot["baseline"]
+            total_value += lot["quantity"] * price
+            basis += lot["quantity"] * lot["baseline"]
+        dollar_change = total_value - basis
+        percent_change = (dollar_change / basis * 100) if basis else 0.0
         collection_trend.append(
             {
-                "date": entry["date"],
-                "total_value": float(entry["total_value"]),
+                "date": date,
+                "total_value": round(total_value, 2),
+                "cost_basis": round(basis, 2),
                 "dollar_change": round(dollar_change, 2),
                 "percent_change": round(percent_change, 2),
                 "dollar_change_display": f"${dollar_change:+.2f}",
@@ -1103,26 +1146,25 @@ def get_analytics_data(period="all"):
             }
         )
 
-    overall_change = 0.0
-    overall_percent_change = 0.0
-    if collection_trend:
-        overall_change = float(collection_trend[-1]["total_value"]) - float(start_value)
-        overall_percent_change = ((overall_change / start_value) * 100) if start_value else 0.0
+    overall_change = collection_trend[-1]["dollar_change"] if collection_trend else 0.0
+    overall_percent_change = collection_trend[-1]["percent_change"] if collection_trend else 0.0
 
-    history_by_card = {}
-    for row in filtered_history_rows:
-        history_by_card.setdefault(row["card_id"], []).append({
-            "date": row["recorded_at"],
-            "price_usd": float(row["price_usd"] or 0),
-        })
+    lots_by_card = {}
+    for lot in active_lots:
+        lots_by_card.setdefault(lot["card_id"], []).append(lot)
 
     card_change_rows = []
     for row in collection_rows:
-        card_prices = sorted(history_by_card.get(row["card_id"], []), key=lambda item: item["date"])
-        if len(card_prices) < 2:
+        card_lots = lots_by_card.get(row["card_id"])
+        if not card_lots or not trend_dates:
             continue
-        start_price = card_prices[0]["price_usd"]
-        latest_price = card_prices[-1]["price_usd"]
+        quantity = sum(lot["quantity"] for lot in card_lots)
+        if not quantity:
+            continue
+        start_price = sum(lot["quantity"] * lot["baseline"] for lot in card_lots) / quantity
+        latest_price = price_as_of(history_by_card, row["card_id"], trend_dates[-1])
+        if latest_price is None:
+            latest_price = row["price_usd"] if row["price_usd"] is not None else start_price
         dollar_change = latest_price - start_price
         percent_change = ((dollar_change / start_price) * 100) if start_price else 0.0
         card_change_rows.append(
@@ -1140,8 +1182,15 @@ def get_analytics_data(period="all"):
             }
         )
 
-    winners = sorted(card_change_rows, key=lambda item: item["percent_change"], reverse=True)[:5]
-    losers = sorted(card_change_rows, key=lambda item: item["percent_change"])[:5]
+    winners = sorted(
+        (item for item in card_change_rows if item["percent_change"] > 0),
+        key=lambda item: item["percent_change"],
+        reverse=True,
+    )[:5]
+    losers = sorted(
+        (item for item in card_change_rows if item["percent_change"] < 0),
+        key=lambda item: item["percent_change"],
+    )[:5]
 
     return {
         "period": period_key,
@@ -1242,7 +1291,10 @@ def add_to_collection():
         flash("That card could not be found in the catalog.")
         return redirect(url_for("search_page", q=search_q)) if search_q else redirect(url_for("index"))
 
+    now = datetime.utcnow()
     conn = get_db_connection()
+    # Make sure any older rows already have their lot before this purchase is appended.
+    ensure_collection_lots(conn)
     existing = conn.execute(
         "SELECT id, quantity FROM collection WHERE card_id = ?",
         (card_id,),
@@ -1252,10 +1304,22 @@ def add_to_collection():
             "UPDATE collection SET quantity = quantity + ? WHERE card_id = ?",
             (quantity, card_id),
         )
+        collection_id = existing["id"]
     else:
+        collection_id = conn.execute(
+            "INSERT INTO collection (card_id, quantity, acquired_at) VALUES (?, ?, ?)",
+            (card_id, quantity, now.strftime("%Y-%m-%d %H:%M:%S")),
+        ).lastrowid
+    # Lock in the price paid for this purchase; it is never updated afterwards.
+    conn.execute(
+        "INSERT INTO collection_lots (collection_id, quantity, start_price, acquired_at) VALUES (?, ?, ?, ?)",
+        (collection_id, quantity, card["price_usd"], now.strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    if card["price_usd"] is not None:
+        # Anchor the price history on the acquisition day so the graph starts at the price paid.
         conn.execute(
-            "INSERT INTO collection (card_id, quantity) VALUES (?, ?)",
-            (card_id, quantity),
+            "INSERT OR IGNORE INTO price_history (card_id, recorded_at, foil, price_usd) VALUES (?, ?, ?, ?)",
+            (card_id, now.strftime("%Y-%m-%d"), card["foil"], card["price_usd"]),
         )
     conn.commit()
     conn.close()
@@ -1284,6 +1348,7 @@ def remove_from_collection():
         (collection_id,),
     ).fetchone()
     deleted = conn.execute("DELETE FROM collection WHERE id = ?", (collection_id,)).rowcount
+    conn.execute("DELETE FROM collection_lots WHERE collection_id = ?", (collection_id,))
     conn.commit()
     conn.close()
 
@@ -1345,9 +1410,10 @@ conn.close()
 
 '''
 #normalize_collection_quantities()
-start_background_sync()
-log("Database initialized. Startup refresh running in the background; starting the daily Scryfall sync scheduler.")
-schedule_daily_scryfall_sync()
+if os.getenv("MTG_TRACKER_DISABLE_BACKGROUND") != "1":
+    start_background_sync()
+    log("Database initialized. Startup refresh running in the background; starting the daily Scryfall sync scheduler.")
+    schedule_daily_scryfall_sync()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))

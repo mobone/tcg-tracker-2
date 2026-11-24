@@ -5,3 +5,6 @@ venv/
 *.pyo
 *.gz
 *.db-old
+*.db
+*.db-shm
+*.db-wal
