@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 
@@ -452,6 +453,25 @@ class PruneTests(unittest.TestCase):
         self.assertEqual(history[2], [new_day])
         self.assertEqual(history[3], [])
         self.assertEqual(history[4], [old_day, new_day])
+
+    def test_startup_sync_prunes_even_if_refresh_fails(self):
+        calls = []
+        original_refresh, original_prune = app.refresh_default_cards_catalog, app.prune_untracked_data
+
+        def failing_refresh():
+            calls.append("refresh")
+            raise RuntimeError("network down")
+
+        app.refresh_default_cards_catalog = failing_refresh
+        app.prune_untracked_data = lambda: calls.append("prune")
+        try:
+            self.assertTrue(app.start_background_sync(prune=True))
+            deadline = time.time() + 5
+            while len(calls) < 2 and time.time() < deadline:
+                time.sleep(0.01)
+        finally:
+            app.refresh_default_cards_catalog, app.prune_untracked_data = original_refresh, original_prune
+        self.assertEqual(calls, ["refresh", "prune"])
 
     def test_prune_never_wipes_catalog_when_sync_is_stale(self):
         stale = (datetime.utcnow() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")

@@ -850,7 +850,13 @@ def schedule_daily_scryfall_sync():
     return scheduler
 
 
-def start_background_sync():
+def start_background_sync(prune=False):
+    """Refresh the catalog in a background thread.
+
+    With prune=True (used at startup) it then removes untracked data older than RETENTION_DAYS
+    and compacts the database. The prune runs even if the refresh fails; it is safe either way
+    because stale-card detection is measured from the last successful sync.
+    """
     global SYNC_THREAD
 
     with SYNC_LOCK:
@@ -861,7 +867,17 @@ def start_background_sync():
             global SYNC_THREAD
             log("Background sync started")
             try:
-                refresh_default_cards_catalog()
+                try:
+                    refresh_default_cards_catalog()
+                except Exception as exc:
+                    log(f"Background catalog refresh FAILED: {exc!r}")
+                    if not prune:
+                        raise
+                if prune:
+                    try:
+                        prune_untracked_data()
+                    except Exception as exc:
+                        log(f"Startup prune FAILED: {exc!r}")
             finally:
                 with SYNC_LOCK:
                     SYNC_THREAD = None
@@ -1434,8 +1450,8 @@ conn.close()
 '''
 #normalize_collection_quantities()
 if os.getenv("MTG_TRACKER_DISABLE_BACKGROUND") != "1":
-    start_background_sync()
-    log("Database initialized. Startup refresh running in the background; starting the daily Scryfall sync scheduler.")
+    start_background_sync(prune=True)
+    log("Database initialized. Startup refresh + prune/compaction running in the background; starting the daily scheduler.")
     schedule_daily_scryfall_sync()
 
 if __name__ == "__main__":
