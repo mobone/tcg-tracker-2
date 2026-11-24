@@ -190,15 +190,18 @@ def init_db():
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS price_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
             card_id INTEGER NOT NULL,
             recorded_at TEXT NOT NULL,
             foil INTEGER NOT NULL DEFAULT 0,
-            price_usd REAL,
-            UNIQUE(card_id, recorded_at, foil),
-            FOREIGN KEY(card_id) REFERENCES cards(id) ON DELETE CASCADE
-        )
+            price_usd REAL NOT NULL,
+            PRIMARY KEY (card_id, recorded_at)
+        ) WITHOUT ROWID
         """
+    )
+    # Every date prices were imported for. price_history only stores a row when a card's price
+    # changes, so this is what tells charts which days exist.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS price_dates (recorded_at TEXT PRIMARY KEY) WITHOUT ROWID"
     )
     conn.execute(
         """
@@ -220,9 +223,6 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_cards_set_number ON cards(set_code, collector_number)"
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_history_card_date ON price_history(card_id, recorded_at)"
-    )
-    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS collection_lots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -241,8 +241,92 @@ def init_db():
     if conn.execute("PRAGMA user_version").fetchone()[0] < 1:
         remove_duplicate_price_days(conn)
         conn.execute("PRAGMA user_version = 1")
+    if conn.execute("PRAGMA user_version").fetchone()[0] < 2:
+        compact_price_history(conn)
+        conn.execute("PRAGMA user_version = 2")
     conn.commit()
     conn.close()
+
+
+def compact_price_history(conn):
+    """One-time migration to the compact price_history layout.
+
+    Old layout: a row for every card on every import day, plus a rowid, a UNIQUE index and a
+    second index. New layout: WITHOUT ROWID keyed on (card_id, recorded_at), and a row only when
+    the card's price differs from its previous row. Readers carry the last price forward, so
+    every chart and percentage comes out the same with ~4x fewer rows and no extra indexes.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO price_dates (recorded_at) "
+        "SELECT DISTINCT recorded_at FROM price_history WHERE price_usd IS NOT NULL"
+    )
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(price_history)").fetchall()]
+    if "id" not in columns:
+        return  # already the new layout
+    before = conn.execute("SELECT COUNT(*) FROM price_history").fetchone()[0]
+    log(f"Compacting price_history ({before} rows); this runs once and can take a minute...")
+    conn.execute(
+        """
+        CREATE TABLE price_history_compact (
+            card_id INTEGER NOT NULL,
+            recorded_at TEXT NOT NULL,
+            foil INTEGER NOT NULL DEFAULT 0,
+            price_usd REAL NOT NULL,
+            PRIMARY KEY (card_id, recorded_at)
+        ) WITHOUT ROWID
+        """
+    )
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO price_history_compact (card_id, recorded_at, foil, price_usd)
+        SELECT card_id, recorded_at, foil, price_usd
+        FROM (
+            SELECT card_id, recorded_at, foil, price_usd,
+                   LAG(price_usd) OVER (PARTITION BY card_id ORDER BY recorded_at) AS previous_price
+            FROM price_history
+            WHERE price_usd IS NOT NULL
+        )
+        WHERE previous_price IS NULL OR previous_price != price_usd
+        """
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_history_card_date")
+    conn.execute("DROP TABLE price_history")
+    conn.execute("ALTER TABLE price_history_compact RENAME TO price_history")
+    after = conn.execute("SELECT COUNT(*) FROM price_history").fetchone()[0]
+    log(f"price_history compacted: {before} -> {after} rows (space is reclaimed by the next VACUUM)")
+
+
+def latest_price_before(conn, card_id, date, inclusive=False):
+    op = "<=" if inclusive else "<"
+    row = conn.execute(
+        f"SELECT price_usd FROM price_history WHERE card_id = ? AND recorded_at {op} ? "
+        "ORDER BY recorded_at DESC LIMIT 1",
+        (card_id, date),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def record_price(conn, card_id, date, foil, price):
+    """Store a card's price for a date, only if it differs from the price already in effect.
+
+    If an earlier import wrote a different price for this same date and the new price equals the
+    previous day's again, that same-date row is removed so no redundant row is left behind.
+    """
+    if latest_price_before(conn, card_id, date) == price:
+        conn.execute("DELETE FROM price_history WHERE card_id = ? AND recorded_at = ?", (card_id, date))
+        return
+    conn.execute(
+        """
+        INSERT INTO price_history (card_id, recorded_at, foil, price_usd)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(card_id, recorded_at) DO UPDATE SET price_usd = excluded.price_usd
+        """,
+        (card_id, date, foil, price),
+    )
+
+
+def get_price_dates(conn):
+    return [row[0] for row in conn.execute("SELECT recorded_at FROM price_dates ORDER BY recorded_at")]
 
 
 DUPLICATE_DAY_MIN_MATCHES = 20
@@ -703,19 +787,12 @@ def upsert_card_record(record, conn=None, recorded_date=None):
         if card_row is None or price_value is None:
             continue
 
-        conn.execute(
-            """
-            INSERT INTO price_history (card_id, recorded_at, foil, price_usd)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(card_id, recorded_at, foil)
-            DO UPDATE SET price_usd = excluded.price_usd
-            """,
-            (
-                card_row["id"],
-                recorded_date or utc_now().strftime("%Y-%m-%d"),
-                foil_flag,
-                price_value,
-            ),
+        record_price(
+            conn,
+            card_row["id"],
+            recorded_date or utc_now().strftime("%Y-%m-%d"),
+            foil_flag,
+            price_value,
         )
     if close_conn:
         conn.commit()
@@ -772,6 +849,7 @@ def refresh_default_cards_catalog():
             conn.execute("BEGIN IMMEDIATE")
             for record in valid_records:
                 upsert_card_record(record, conn=conn, recorded_date=recorded_date)
+            conn.execute("INSERT OR IGNORE INTO price_dates (recorded_at) VALUES (?)", (recorded_date,))
             conn.execute(
                 "INSERT INTO sync_log (synced_at, cards_updated, source_url, data_generated_at) VALUES (?, ?, ?, ?)",
                 (
@@ -838,10 +916,19 @@ def _prune_untracked_data_once(retention_days):
             )
 
             conn.execute("BEGIN IMMEDIATE")
+            # Rows only exist when a price changes, so each card keeps its last row before the
+            # cutoff: that is still its price on the first day of the 30-day window.
             history_deleted = conn.execute(
-                "DELETE FROM price_history WHERE recorded_at < ? "
-                "AND card_id NOT IN (SELECT card_id FROM collection)",
-                (history_cutoff,),
+                """
+                DELETE FROM price_history
+                WHERE recorded_at < :cutoff
+                  AND card_id NOT IN (SELECT card_id FROM collection)
+                  AND recorded_at < (
+                      SELECT MAX(p.recorded_at) FROM price_history p
+                      WHERE p.card_id = price_history.card_id AND p.recorded_at < :cutoff
+                  )
+                """,
+                {"cutoff": history_cutoff},
             ).rowcount
             cards_deleted = 0
             if reference is not None:
@@ -1085,6 +1172,8 @@ def get_collection_rows():
 
 
 def get_card_history(card_id):
+    """One point per import day from the card's first recorded price on, carrying the price
+    forward over days where it did not change (only changes are stored)."""
     conn = get_db_connection()
     rows = conn.execute(
         """
@@ -1095,8 +1184,23 @@ def get_card_history(card_id):
         """,
         (card_id,),
     ).fetchall()
+    if not rows:
+        conn.close()
+        return []
+    import_dates = conn.execute(
+        "SELECT recorded_at FROM price_dates WHERE recorded_at >= ? ORDER BY recorded_at",
+        (rows[0]["recorded_at"],),
+    ).fetchall()
     conn.close()
-    return [dict(row) for row in rows]
+
+    changes = {row["recorded_at"]: row["price_usd"] for row in rows}
+    foil = rows[0]["foil"]
+    history = []
+    price = None
+    for date in sorted(set(changes) | {row[0] for row in import_dates}):
+        price = changes.get(date, price)
+        history.append({"recorded_at": date, "price_usd": price, "foil": foil})
+    return history
 
 
 def get_card_by_id(card_id):
@@ -1230,12 +1334,13 @@ def get_analytics_data(period="all"):
     ).fetchall()
 
     lots, history_by_card = load_owned_price_data(conn)
+    import_dates = set(get_price_dates(conn))
     conn.commit()
     conn.close()
 
     lot_dates = {lot["acquired_date"] for lot in lots if lot["acquired_date"]}
     history_dates = {date for dates, _ in history_by_card.values() for date in dates}
-    all_known_dates = history_dates | lot_dates
+    all_known_dates = history_dates | lot_dates | import_dates
     latest_date = max(all_known_dates) if all_known_dates else utc_now().date().isoformat()
     if lookup_months is None:
         boundary = None
@@ -1473,11 +1578,13 @@ def add_to_collection():
         "INSERT INTO collection_lots (collection_id, quantity, start_price, acquired_at) VALUES (?, ?, ?, ?)",
         (collection_id, quantity, card["price_usd"], now.strftime("%Y-%m-%d %H:%M:%S")),
     )
-    if card["price_usd"] is not None:
-        # Anchor the price history on the acquisition day so the graph starts at the price paid.
+    today = now.strftime("%Y-%m-%d")
+    # Make the acquisition day a point on the charts, starting at the price paid.
+    conn.execute("INSERT OR IGNORE INTO price_dates (recorded_at) VALUES (?)", (today,))
+    if card["price_usd"] is not None and latest_price_before(conn, card_id, today, inclusive=True) != card["price_usd"]:
         conn.execute(
             "INSERT OR IGNORE INTO price_history (card_id, recorded_at, foil, price_usd) VALUES (?, ?, ?, ?)",
-            (card_id, now.strftime("%Y-%m-%d"), card["foil"], card["price_usd"]),
+            (card_id, today, card["foil"], card["price_usd"]),
         )
     conn.commit()
     conn.close()

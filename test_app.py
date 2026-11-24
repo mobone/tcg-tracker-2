@@ -418,7 +418,7 @@ class PruneTests(unittest.TestCase):
     def test_prune_removes_only_old_untracked_data(self):
         now = app.utc_now()
         fmt = lambda days, f="%Y-%m-%d %H:%M:%S": (now - timedelta(days=days)).strftime(f)
-        old_day, new_day = fmt(40, "%Y-%m-%d"), fmt(1, "%Y-%m-%d")
+        very_old_day, old_day, new_day = fmt(45, "%Y-%m-%d"), fmt(40, "%Y-%m-%d"), fmt(1, "%Y-%m-%d")
         conn = sqlite3.connect(self.temp_db)
         cards = [
             (1, "Owned", fmt(0)),        # in collection: keep everything
@@ -431,10 +431,10 @@ class PruneTests(unittest.TestCase):
                 "INSERT INTO cards (id, name, set_code, collector_number, foil, price_usd, last_updated) VALUES (?, ?, 'tst', ?, 0, 1.0, ?)",
                 (card_id, name, str(card_id), updated),
             )
-            for day in (old_day, new_day):
+            for day, price in ((very_old_day, 0.5), (old_day, 1.0), (new_day, 2.0)):
                 conn.execute(
-                    "INSERT INTO price_history (card_id, recorded_at, foil, price_usd) VALUES (?, ?, 0, 1.0)",
-                    (card_id, day),
+                    "INSERT INTO price_history (card_id, recorded_at, foil, price_usd) VALUES (?, ?, 0, ?)",
+                    (card_id, day, price),
                 )
         conn.execute("INSERT INTO collection (card_id, quantity) VALUES (1, 1)")
         conn.execute("INSERT INTO collection (card_id, quantity) VALUES (4, 1)")
@@ -452,10 +452,12 @@ class PruneTests(unittest.TestCase):
         }
         conn.close()
         self.assertEqual(remaining_cards, [1, 2, 4])
-        self.assertEqual(history[1], [old_day, new_day])
-        self.assertEqual(history[2], [new_day])
+        self.assertEqual(history[1], [very_old_day, old_day, new_day])
+        # Untracked: older rows go, but the last price before the cutoff stays because it is
+        # still the card's price at the start of the 30-day window.
+        self.assertEqual(history[2], [old_day, new_day])
         self.assertEqual(history[3], [])
-        self.assertEqual(history[4], [old_day, new_day])
+        self.assertEqual(history[4], [very_old_day, old_day, new_day])
 
     def test_startup_sync_prunes_even_if_refresh_fails(self):
         calls = []
@@ -652,6 +654,112 @@ class ScryfallImportDedupTests(unittest.TestCase):
         self.assertEqual(removed_days, ["2026-10-02", "2026-10-04"])
         self.assertEqual(removed_rows, 60)
         self.assertEqual(remaining, [("2026-10-01", 30), ("2026-10-02", 1), ("2026-10-03", 30)])
+
+
+class CompactPriceHistoryTests(unittest.TestCase):
+    """price_history only stores changes; everything that reads it must behave as before."""
+
+    def setUp(self):
+        self.original_db = app.app.config["DATABASE"]
+        fd, self.temp_db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        app.app.config["DATABASE"] = self.temp_db
+
+    def tearDown(self):
+        app.app.config["DATABASE"] = self.original_db
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self.temp_db + suffix):
+                os.remove(self.temp_db + suffix)
+
+    def build_old_layout_db(self):
+        """A database in the old layout: one price row per card per day, rowid + indexes."""
+        conn = sqlite3.connect(self.temp_db)
+        conn.executescript(
+            """
+            CREATE TABLE price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, card_id INTEGER NOT NULL,
+                recorded_at TEXT NOT NULL, foil INTEGER NOT NULL DEFAULT 0, price_usd REAL,
+                UNIQUE(card_id, recorded_at, foil));
+            CREATE INDEX idx_history_card_date ON price_history(card_id, recorded_at);
+            """
+        )
+        daily = {
+            1: [10.0, 10.0, 12.0, 12.0, 12.0, 9.0],   # owned
+            2: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0],       # never changes
+        }
+        days = [f"2026-10-0{i}" for i in range(1, 7)]
+        for card_id, prices in daily.items():
+            for day, price in zip(days, prices):
+                conn.execute(
+                    "INSERT INTO price_history (card_id, recorded_at, foil, price_usd) VALUES (?, ?, 0, ?)",
+                    (card_id, day, price),
+                )
+        conn.commit()
+        conn.close()
+        app.init_db()
+        conn = sqlite3.connect(self.temp_db)
+        for card_id, name in ((1, "Owned"), (2, "Flat")):
+            conn.execute(
+                "INSERT INTO cards (id, name, set_code, collector_number, foil, price_usd, last_updated) VALUES (?, ?, 'tst', ?, 0, ?, '2026-10-06 00:00:00')",
+                (card_id, name, str(card_id), daily[card_id][-1]),
+            )
+        conn.execute("INSERT INTO collection (id, card_id, quantity, acquired_at) VALUES (1, 1, 2, '2026-10-01 00:00:00')")
+        conn.commit()
+        conn.close()
+        return days
+
+    def test_migration_keeps_only_changes_and_drops_extra_indexes(self):
+        days = self.build_old_layout_db()
+        conn = sqlite3.connect(self.temp_db)
+        rows = conn.execute("SELECT card_id, recorded_at, price_usd FROM price_history ORDER BY card_id, recorded_at").fetchall()
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(price_history)")]
+        indexes = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='price_history'")]
+        price_dates = [row[0] for row in conn.execute("SELECT recorded_at FROM price_dates ORDER BY 1")]
+        conn.close()
+
+        self.assertEqual(rows, [
+            (1, "2026-10-01", 10.0), (1, "2026-10-03", 12.0), (1, "2026-10-06", 9.0),
+            (2, "2026-10-01", 5.0),
+        ])
+        self.assertNotIn("id", columns)
+        self.assertEqual(indexes, [])  # WITHOUT ROWID primary key, no extra index
+        self.assertEqual(price_dates, days)
+
+    def test_charts_and_numbers_match_daily_rows(self):
+        days = self.build_old_layout_db()
+
+        history = app.get_card_history(1)
+        self.assertEqual([h["recorded_at"] for h in history], days)
+        self.assertEqual([h["price_usd"] for h in history], [10.0, 10.0, 12.0, 12.0, 12.0, 9.0])
+        self.assertEqual([h["price_usd"] for h in app.get_card_history(2)], [5.0] * 6)
+
+        analytics = app.get_analytics_data("all")
+        self.assertEqual([p["date"] for p in analytics["collection_trend"]], days)
+        self.assertEqual([p["total_value"] for p in analytics["collection_trend"]], [20.0, 20.0, 24.0, 24.0, 24.0, 18.0])
+        self.assertEqual(analytics["summary"]["overall_change"], -2.0)
+        row = app.get_collection_rows()[0]
+        self.assertEqual((row["start_price"], row["percent_change"]), (10.0, -10.0))
+
+    def test_import_with_unchanged_price_adds_a_day_but_no_row(self):
+        app.init_db()
+        conn = sqlite3.connect(self.temp_db)
+        conn.row_factory = sqlite3.Row
+        record = {"id": "x", "name": "Sol Ring", "set": "cmm", "set_name": "CMM", "collector_number": "1",
+                  "finishes": ["nonfoil"], "prices": {"usd": "2.00"}}
+        app.upsert_card_record(record, conn=conn, recorded_date="2026-11-01")
+        app.upsert_card_record(record, conn=conn, recorded_date="2026-11-02")
+        app.upsert_card_record(dict(record, prices={"usd": "3.00"}), conn=conn, recorded_date="2026-11-03")
+        # A second file for the same day that goes back to the previous price leaves no stale row.
+        app.upsert_card_record(record, conn=conn, recorded_date="2026-11-03")
+        for day in ("2026-11-01", "2026-11-02", "2026-11-03"):
+            conn.execute("INSERT OR IGNORE INTO price_dates VALUES (?)", (day,))
+        conn.commit()
+        rows = conn.execute("SELECT recorded_at, price_usd FROM price_history").fetchall()
+        card_id = conn.execute("SELECT id FROM cards").fetchone()[0]
+        conn.close()
+
+        self.assertEqual([tuple(r) for r in rows], [("2026-11-01", 2.0)])
+        self.assertEqual([h["price_usd"] for h in app.get_card_history(card_id)], [2.0, 2.0, 2.0])
 
 
 if __name__ == "__main__":
