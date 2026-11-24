@@ -505,6 +505,20 @@ class PruneTests(unittest.TestCase):
             blocker.close()
             app.PRUNE_LOCK_TIMEOUT_SECONDS = original_timeout
 
+    def test_prune_leaves_wal_file_empty(self):
+        conn = sqlite3.connect(self.temp_db)
+        conn.executemany(
+            "INSERT INTO price_history (card_id, recorded_at, foil, price_usd) VALUES (?, '2020-01-01', 0, 1.0)",
+            [(i,) for i in range(1, 5000)],
+        )
+        conn.commit()
+        conn.close()
+
+        app.prune_untracked_data()
+
+        wal = self.temp_db + "-wal"
+        self.assertEqual(os.path.getsize(wal) if os.path.exists(wal) else 0, 0)
+
     def test_prune_never_wipes_catalog_when_sync_is_stale(self):
         stale = (app.utc_now() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(self.temp_db)

@@ -56,12 +56,31 @@ def log(*args):
     print(datetime.now().strftime("[%Y-%m-%d %H:%M:%S]"), *args, flush=True)
 
 
+WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+
+
 def get_db_connection(timeout=5.0):
     # timeout = how long to wait for another connection's lock before "database is locked".
     conn = sqlite3.connect(app.config["DATABASE"], timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # SQLite never shrinks the -wal file by itself; after each checkpoint, trim it back to this size
+    # so one big write (the daily sync, VACUUM) doesn't leave a huge -wal file behind for good.
+    conn.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT_BYTES}")
     return conn
+
+
+def shrink_wal(conn, context):
+    """Copy everything in the -wal file into the main database and truncate the -wal to 0 bytes.
+
+    Skipped (and logged) if a reader is mid-query; the journal_size_limit trim and the next run
+    take care of it then. Committed data is never at risk either way.
+    """
+    busy, wal_pages, checkpointed = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    if busy:
+        log(f"{context}: WAL checkpoint postponed, database in use ({checkpointed}/{wal_pages} pages copied)")
+    else:
+        log(f"{context}: WAL checkpointed and truncated")
 
 
 def init_db():
@@ -673,6 +692,7 @@ def refresh_default_cards_catalog():
                 (utc_now().strftime("%Y-%m-%d %H:%M:%S"), len(valid_records)),
             )
             conn.commit()
+            shrink_wal(conn, "Scryfall refresh")
         finally:
             conn.close()
 
@@ -749,8 +769,8 @@ def _prune_untracked_data_once(retention_days):
 
             log("Compacting database (VACUUM)...")
             conn.execute("VACUUM")
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             log("Database compaction complete")
+            shrink_wal(conn, "Prune")
         finally:
             conn.close()
     return history_deleted, cards_deleted
