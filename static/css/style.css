@@ -137,11 +137,13 @@ body {
   cursor: pointer;
 }
 
+/* Fixed to the viewport so scroll containers like .table-responsive can't clip it;
+   positionHoverImage() in base.html sets top/left next to the card name. */
 .card-hover-image {
-  position: absolute;
-  left: calc(100% + 12px);
-  top: -12px;
-  z-index: 100;
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  z-index: 1040;
   width: 180px;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);

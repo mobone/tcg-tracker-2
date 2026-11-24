@@ -43,5 +43,47 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      // Place the card hover image beside the card name, kept fully inside the window:
+      // flips to the left side if there is no room on the right, and shifts up near the bottom.
+      (() => {
+        const GAP = 12;
+        const MARGIN = 8;
+        const positionHoverImage = (wrap) => {
+          const image = wrap.querySelector('.card-hover-image');
+          const trigger = wrap.querySelector('.card-hover-name');
+          if (!image || !trigger) return;
+          const rect = trigger.getBoundingClientRect();
+          const width = image.offsetWidth || 180;
+          const height = image.offsetHeight || Math.round(width * 1.4);
+          let left = rect.right + GAP;
+          if (left + width > window.innerWidth - MARGIN) {
+            left = Math.max(MARGIN, rect.left - GAP - width);
+          }
+          let top = Math.min(rect.top - GAP, window.innerHeight - MARGIN - height);
+          top = Math.max(MARGIN, top);
+          image.style.left = `${left}px`;
+          image.style.top = `${top}px`;
+        };
+        const fromEvent = (event) => {
+          const wrap = event.target.closest && event.target.closest('.card-hover-wrap');
+          if (wrap) positionHoverImage(wrap);
+        };
+        const repositionVisible = () => {
+          document.querySelectorAll('.card-hover-wrap.is-hovered').forEach(positionHoverImage);
+        };
+        document.addEventListener('mouseover', fromEvent);
+        document.addEventListener('focusin', fromEvent);
+        window.addEventListener('scroll', repositionVisible, { passive: true, capture: true });
+        window.addEventListener('resize', repositionVisible);
+        // Images that finish loading after the hover started change height; re-place them.
+        document.querySelectorAll('.card-hover-image').forEach((image) => {
+          image.addEventListener('load', () => {
+            const wrap = image.closest('.card-hover-wrap');
+            if (wrap && wrap.classList.contains('is-hovered')) positionHoverImage(wrap);
+          });
+        });
+      })();
+    </script>
   </body>
 </html>
