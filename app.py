@@ -44,6 +44,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+#test
 
 def log(*args):
     print(datetime.now().strftime("[%Y-%m-%d %H:%M:%S]"), *args, flush=True)
