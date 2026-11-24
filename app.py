@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 from bisect import bisect_right
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -45,6 +45,12 @@ logging.basicConfig(
 )
 
 #test
+
+def utc_now():
+    """Current UTC time as a naive datetime (same values the old utc_now() returned,
+    which is what the stored timestamps and date comparisons expect)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 def log(*args):
     print(datetime.now().strftime("[%Y-%m-%d %H:%M:%S]"), *args, flush=True)
@@ -575,7 +581,7 @@ def upsert_card_record(record, conn=None):
     close_conn = conn is None
     if conn is None:
         conn = get_db_connection()
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = utc_now().strftime("%Y-%m-%d %H:%M:%S")
     for finish, foil_flag, raw_price in variants:
         price_value = float(raw_price) if raw_price is not None else None
         conn.execute(
@@ -623,7 +629,7 @@ def upsert_card_record(record, conn=None):
             """,
             (
                 card_row["id"],
-                datetime.utcnow().strftime("%Y-%m-%d"),
+                utc_now().strftime("%Y-%m-%d"),
                 foil_flag,
                 price_value,
             ),
@@ -664,7 +670,7 @@ def refresh_default_cards_catalog():
                 upsert_card_record(record, conn=conn)
             conn.execute(
                 "INSERT INTO sync_log (synced_at, cards_updated) VALUES (?, ?)",
-                (datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), len(valid_records)),
+                (utc_now().strftime("%Y-%m-%d %H:%M:%S"), len(valid_records)),
             )
             conn.commit()
         finally:
@@ -707,7 +713,7 @@ def _prune_untracked_data_once(retention_days):
       data, or sealed products whose prices stopped updating) are removed if untracked.
     Cards in the collection keep their full history.
     """
-    now = datetime.utcnow()
+    now = utc_now()
     history_cutoff = (now - timedelta(days=retention_days)).strftime("%Y-%m-%d")
     with DB_MAINTENANCE_LOCK:
         conn = get_db_connection(timeout=PRUNE_LOCK_TIMEOUT_SECONDS)
@@ -817,7 +823,7 @@ def needs_daily_sync(last_sync):
         else:
             return True
 
-    return (datetime.utcnow() - last_sync).total_seconds() >= 86400
+    return (utc_now() - last_sync).total_seconds() >= 86400
 
 
 def sync_if_needed():
@@ -1120,7 +1126,7 @@ def get_analytics_data(period="all"):
     lot_dates = {lot["acquired_date"] for lot in lots if lot["acquired_date"]}
     history_dates = {date for dates, _ in history_by_card.values() for date in dates}
     all_known_dates = history_dates | lot_dates
-    latest_date = max(all_known_dates) if all_known_dates else datetime.utcnow().date().isoformat()
+    latest_date = max(all_known_dates) if all_known_dates else utc_now().date().isoformat()
     if lookup_months is None:
         boundary = None
     else:
@@ -1333,7 +1339,7 @@ def add_to_collection():
         flash("That card could not be found in the catalog.")
         return redirect(url_for("search_page", q=search_q)) if search_q else redirect(url_for("index"))
 
-    now = datetime.utcnow()
+    now = utc_now()
     conn = get_db_connection()
     # Make sure any older rows already have their lot before this purchase is appended.
     ensure_collection_lots(conn)

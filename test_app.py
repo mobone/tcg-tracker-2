@@ -18,11 +18,11 @@ import app  # noqa: E402
 
 class DailySyncTests(unittest.TestCase):
     def test_needs_daily_sync_when_last_sync_is_old(self):
-        last_sync = datetime.utcnow() - timedelta(days=2)
+        last_sync = app.utc_now() - timedelta(days=2)
         self.assertTrue(app.needs_daily_sync(last_sync))
 
     def test_needs_daily_sync_when_last_sync_is_recent(self):
-        last_sync = datetime.utcnow() - timedelta(hours=2)
+        last_sync = app.utc_now() - timedelta(hours=2)
         self.assertFalse(app.needs_daily_sync(last_sync))
 
 
@@ -43,11 +43,11 @@ class AnalyticsTrendTests(unittest.TestCase):
         conn = sqlite3.connect(app.app.config["DATABASE"])
         conn.execute(
             "INSERT INTO cards (id, name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (1, "Winner Card", "M20", "Core Set 2020", "1", 0, 10.0, "https://example.com/winner.jpg", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+            (1, "Winner Card", "M20", "Core Set 2020", "1", 0, 10.0, "https://example.com/winner.jpg", app.utc_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.execute(
             "INSERT INTO cards (id, name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (2, "Loser Card", "M20", "Core Set 2020", "2", 0, 100.0, "https://example.com/loser.jpg", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+            (2, "Loser Card", "M20", "Core Set 2020", "2", 0, 100.0, "https://example.com/loser.jpg", app.utc_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.execute("INSERT INTO collection (card_id, quantity, acquired_at) VALUES (?, ?, ?)", (1, 1, "2024-01-01 12:00:00"))
         conn.execute("INSERT INTO collection (card_id, quantity, acquired_at) VALUES (?, ?, ?)", (2, 1, "2024-01-01 12:00:00"))
@@ -104,7 +104,7 @@ class SearchResultModalTests(unittest.TestCase):
         conn = sqlite3.connect(app.app.config["DATABASE"])
         conn.execute(
             "INSERT INTO cards (name, flavor_name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("Yawgmoth, Thran Physician", "The Emperor, Hell Tyrant", "FCA", "FINAL FANTASY: Through the Ages", "11", 0, 25.0, "https://example.com/empire.jpg", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+            ("Yawgmoth, Thran Physician", "The Emperor, Hell Tyrant", "FCA", "FINAL FANTASY: Through the Ages", "11", 0, 25.0, "https://example.com/empire.jpg", app.utc_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
         conn.close()
@@ -120,7 +120,7 @@ class SearchResultModalTests(unittest.TestCase):
         conn = sqlite3.connect(app.app.config["DATABASE"])
         conn.execute(
             "INSERT INTO cards (name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, 999.0, "https://example.com/lotus-petal.jpg", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+            ("Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, 999.0, "https://example.com/lotus-petal.jpg", app.utc_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
         conn.close()
@@ -139,11 +139,11 @@ class SearchResultModalTests(unittest.TestCase):
         conn = sqlite3.connect(app.app.config["DATABASE"])
         conn.execute(
             "INSERT INTO cards (name, set_code, set_name, collector_number, foil, price_usd, image_url, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, 999.0, "https://example.com/lotus-petal.jpg", datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+            ("Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, 999.0, "https://example.com/lotus-petal.jpg", app.utc_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.execute(
             "INSERT INTO collection (card_id, quantity, name, set_code, set_name, collector_number, foil, image_url, price_usd, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (1, 1, "Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, "https://example.com/lotus-petal.jpg", 999.0, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")),
+            (1, 1, "Lotus Petal", "LEA", "Limited Edition Alpha", "1", 0, "https://example.com/lotus-petal.jpg", 999.0, app.utc_now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
         conn.close()
@@ -301,7 +301,7 @@ class StartPriceTests(unittest.TestCase):
         return next(row for row in app.get_collection_rows() if row["card_id"] == card_id)
 
     def today(self):
-        return datetime.utcnow().strftime("%Y-%m-%d")
+        return app.utc_now().strftime("%Y-%m-%d")
 
     def test_history_before_acquisition_is_ignored(self):
         self.add_card(1, "Old Card", 5.0)
@@ -414,7 +414,7 @@ class PruneTests(unittest.TestCase):
                 os.remove(self.temp_db + suffix)
 
     def test_prune_removes_only_old_untracked_data(self):
-        now = datetime.utcnow()
+        now = app.utc_now()
         fmt = lambda days, f="%Y-%m-%d %H:%M:%S": (now - timedelta(days=days)).strftime(f)
         old_day, new_day = fmt(40, "%Y-%m-%d"), fmt(1, "%Y-%m-%d")
         conn = sqlite3.connect(self.temp_db)
@@ -506,7 +506,7 @@ class PruneTests(unittest.TestCase):
             app.PRUNE_LOCK_TIMEOUT_SECONDS = original_timeout
 
     def test_prune_never_wipes_catalog_when_sync_is_stale(self):
-        stale = (datetime.utcnow() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
+        stale = (app.utc_now() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
         conn = sqlite3.connect(self.temp_db)
         conn.execute(
             "INSERT INTO cards (id, name, set_code, collector_number, foil, price_usd, last_updated) VALUES (1, 'Catalog', 'tst', '1', 0, 1.0, ?)",
