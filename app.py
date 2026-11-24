@@ -1338,25 +1338,48 @@ def remove_from_collection():
         return redirect(url_for("index"))
 
     conn = get_db_connection()
+    ensure_collection_lots(conn)
     row = conn.execute(
         """
-        SELECT cards.name, cards.set_code
+        SELECT collection.quantity, cards.name, cards.set_code
         FROM collection
         JOIN cards ON cards.id = collection.card_id
         WHERE collection.id = ?
         """,
         (collection_id,),
     ).fetchone()
-    deleted = conn.execute("DELETE FROM collection WHERE id = ?", (collection_id,)).rowcount
-    conn.execute("DELETE FROM collection_lots WHERE collection_id = ?", (collection_id,))
+    if row is None:
+        conn.close()
+        flash("That collection entry could not be found.")
+        return redirect(url_for("index"))
+
+    # Remove one copy per click, taken from the most recent purchase so it undoes the latest add
+    # and earlier copies keep their locked-in start prices.
+    remaining = (row["quantity"] or 1) - 1
+    if remaining <= 0:
+        conn.execute("DELETE FROM collection WHERE id = ?", (collection_id,))
+        conn.execute("DELETE FROM collection_lots WHERE collection_id = ?", (collection_id,))
+    else:
+        conn.execute("UPDATE collection SET quantity = ? WHERE id = ?", (remaining, collection_id))
+        lot = conn.execute(
+            "SELECT id, quantity FROM collection_lots WHERE collection_id = ? ORDER BY acquired_at DESC, id DESC LIMIT 1",
+            (collection_id,),
+        ).fetchone()
+        if lot is not None:
+            if lot["quantity"] > 1:
+                conn.execute("UPDATE collection_lots SET quantity = quantity - 1 WHERE id = ?", (lot["id"],))
+            else:
+                conn.execute("DELETE FROM collection_lots WHERE id = ?", (lot["id"],))
     conn.commit()
     conn.close()
 
-    if deleted and row:
-        log(f"Removed collection entry {collection_id}: {row['name']} ({row['set_code']})")
-        flash(f"Removed {row['name']} ({row['set_code']}) from your collection.")
+    label = f"{row['name']} ({row['set_code']})"
+    if remaining <= 0:
+        log(f"Removed collection entry {collection_id}: {label}")
+        flash(f"Removed {label} from your collection.")
     else:
-        flash("That collection entry could not be found.")
+        log(f"Removed 1 copy of collection entry {collection_id}: {label}; {remaining} left")
+        flash(f"Removed 1 × {label}. {remaining} left in your collection.")
     return redirect(url_for("index"))
 
 

@@ -95,6 +95,25 @@
       const collectionTable = document.getElementById('collection-table');
       if (!collectionTable) return;
 
+      // Name filter: every word typed must appear in the card name. Applies to list and card views.
+      const filterInput = document.getElementById('collection-filter');
+      const filterCount = document.getElementById('filter-count');
+      const filterEmpty = document.getElementById('filter-empty');
+      const filterItems = document.querySelectorAll('#collection-view [data-name]');
+      const totalCards = collectionTable.querySelectorAll('tbody tr').length;
+      const applyFilter = () => {
+        const tokens = filterInput.value.toLowerCase().split(/\s+/).filter(Boolean);
+        let shown = 0;
+        filterItems.forEach((item) => {
+          const match = tokens.every((token) => item.dataset.name.includes(token));
+          item.style.display = match ? '' : 'none';
+          if (match && item.tagName === 'TR') shown += 1;
+        });
+        filterCount.textContent = tokens.length ? `Showing ${shown} of ${totalCards}` : '';
+        filterEmpty.hidden = !tokens.length || shown > 0;
+      };
+      filterInput.addEventListener('input', applyFilter);
+
       const tbody = collectionTable.querySelector('tbody');
       const headers = collectionTable.querySelectorAll('th[data-sort-key]');
 
@@ -160,6 +179,8 @@
       <h2>Collection</h2>
       {% if collection_rows %}
         <div class="d-flex align-items-center gap-2 flex-wrap">
+          <input type="search" id="collection-filter" class="form-control form-control-sm bg-dark text-light border-secondary w-auto" placeholder="Filter by name" aria-label="Filter collection by name" autocomplete="off" />
+          <span id="filter-count" class="small text-secondary" aria-live="polite"></span>
           <label for="sort-by" class="small text-secondary mb-0">Sort by</label>
           <select id="sort-by" class="form-select form-select-sm bg-dark text-light border-secondary w-auto">
             <option value="">Default</option>
@@ -275,9 +296,9 @@
                           </ul>
                           <div class="d-flex gap-2 mt-3 flex-wrap">
                             <a class="btn btn-outline-light" href="{{ url_for('card_detail', card_id=row.card_id) }}">View full history</a>
-                            <form method="POST" action="{{ url_for('remove_from_collection') }}" onsubmit='return confirm({{ ("Delete " ~ row.name ~ " from your collection?")|tojson }});'>
+                            <form method="POST" action="{{ url_for('remove_from_collection') }}" onsubmit='return confirm({{ (("Remove 1 copy of " ~ row.name ~ "? " ~ (row.quantity - 1) ~ " will be left.") if row.quantity > 1 else ("Delete " ~ row.name ~ " from your collection?"))|tojson }});'>
                               <input type="hidden" name="collection_id" value="{{ row.collection_id }}" />
-                              <button class="btn btn-danger" type="submit">Delete</button>
+                              <button class="btn btn-danger" type="submit">{{ 'Remove 1' if row.quantity > 1 else 'Delete' }}</button>
                             </form>
                           </div>
                         </div>
@@ -287,6 +308,9 @@
                 </div>
               </div>
       {% endfor %}
+      <div id="filter-empty" class="empty-state" hidden>
+        <p>No cards in your collection match this filter.</p>
+      </div>
      </div>
     {% else %}
       <div class="empty-state">

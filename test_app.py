@@ -368,6 +368,24 @@ class StartPriceTests(unittest.TestCase):
         self.assertEqual(analytics["collection_trend"][0]["total_value"], 10.0)
         self.assertEqual([card["name"] for card in analytics["top_winners"]], ["Held"])
 
+    def test_remove_takes_one_copy_from_latest_purchase(self):
+        self.add_card(1, "Playset", 10.0)
+        self.client.post("/add-to-collection", data={"card_id": 1, "quantity": 2})
+        self.execute("UPDATE cards SET price_usd = 20.0 WHERE id = 1")
+        self.client.post("/add-to-collection", data={"card_id": 1, "quantity": 1})
+        collection_id = app.get_collection_rows()[0]["collection_id"]
+        self.assertAlmostEqual(self.collection_row(1)["start_price"], 13.33)
+
+        self.client.post("/remove-from-collection", data={"collection_id": collection_id})
+        row = self.collection_row(1)
+        self.assertEqual(row["quantity"], 2)
+        self.assertEqual(row["start_price"], 10.0)
+
+        self.client.post("/remove-from-collection", data={"collection_id": collection_id})
+        self.assertEqual(self.collection_row(1)["quantity"], 1)
+        self.client.post("/remove-from-collection", data={"collection_id": collection_id})
+        self.assertEqual(app.get_collection_rows(), [])
+
     def test_remove_deletes_lots(self):
         self.add_card(1, "Gone", 10.0)
         self.client.post("/add-to-collection", data={"card_id": 1, "quantity": 1})
